@@ -1,35 +1,43 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Sequence
 
 
-@dataclass(frozen=True)
-class Settings:
-    """
-    Application settings.
-
-    kb_dir:
-      Path to the knowledge base folder. Defaults to <repo-root>/knowledge-base
-      assuming a standard "src layout":
-        repo/
-          knowledge-base/
-          src/slimx_assistant/...
-    """
-        
-    kb_dir: Path
+@dataclass(frozen=True, slots=True)
+class IngestSettings:
     glob: str = "**/*.md"
+    multithreading: bool = False
+    show_progress: bool = False
 
-    # How to infer doc_type:
-    # - "subdir": doc_type is drived from the frst folder(s) under kb_dir
-    # - "none": do not add doc_type
 
-    doc_type_mode: Literal["subdir", "none"] = "subdir"
-    doc_type_depth: int = 1  # number of path parts to use for doc_type when doc_type_mode="subdir"
+@dataclass(frozen=True, slots=True)
+class ChunkSettings:
+    chunk_size: int = 800
+    chunk_overlap: int = 120
+    separators: Sequence[str] = ("\n\n", "\n", " ", "")
 
-    @staticmethod
-    def default() -> Settings:
-        root_dir = Path(__file__).resolve().parents[2] # TODO: improve detection of repo root
-        kb_dir = root_dir / "knowledge-base"
-        return Settings(kb_dir=kb_dir)
+
+@dataclass(frozen=True, slots=True)
+class PipelineSettings:
+    kb_dir: Path = Path("./knowledge-base")
+    out_dir: Path = Path("./output")
+
+    ingest: IngestSettings = field(default_factory=IngestSettings)
+    chunk: ChunkSettings = field(default_factory=ChunkSettings)
+
+    docs_filename: str = "docs.jsonl"
+    chunks_filename: str = "chunks.jsonl"
+
+    @property
+    def docs_path(self) -> Path:
+        return self.out_dir / self.docs_filename
+
+    @property
+    def chunks_path(self) -> Path:
+        return self.out_dir / self.chunks_filename
+    
+    def validate(self) -> None:
+        if self.chunk.chunk_overlap >= self.chunk.chunk_size:
+            raise ValueError("chunk_overlap must be < chunk_size")
