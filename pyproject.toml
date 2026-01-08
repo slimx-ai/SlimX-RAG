@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling>=1.22.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slimx-assistant"
+version = "0.1.0"
+description = "RAG implementation modules (ingest first) using LangChain"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "SlimX Team", email = "info@slimx.ai" },
+]
+dependencies = [
+  "langchain-community>=0.4,<1",
+  "langchain-core>=1.2,<2",
+  "tqdm>=4.66",
+]
+
+[project.scripts]
+slimx-ingest = "slimx_assistant.ingest.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/slimx_assistant"]
