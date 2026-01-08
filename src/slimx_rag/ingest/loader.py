@@ -8,7 +8,7 @@ from typing import List, Iterable, Optional
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_core.documents import Document
 
-from slimx_assistant.settings import Settings
+from slimx_rag.settings import Settings
 
 logger = logging.getLogger(__name__)
 

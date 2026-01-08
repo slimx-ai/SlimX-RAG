@@ -4,8 +4,8 @@ import argparse
 import logging
 from pathlib import Path
 
-from slimx_assistant.ingest.loader import fetch_documents
-from slimx_assistant.settings import Settings
+from slimx_rag.ingest.loader import fetch_documents
+from slimx_rag.settings import Settings
 
 
 

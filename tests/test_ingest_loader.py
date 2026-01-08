@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import pytest
 
-from slimx_assistant.ingest.loader import fetch_documents
-from slimx_assistant.settings import Settings
+from slimx_rag.ingest.loader import fetch_documents
+from slimx_rag.settings import Settings
 
 
 def write(p: Path, text: str) -> None:

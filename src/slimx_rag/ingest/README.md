@@ -53,7 +53,7 @@ by disabling `doc_type` derivation.
 ## Public API
 
 ```python
-from slimx_assistant.ingest import fetch_documents
+from slimx_rag.ingest import fetch_documents
 
 docs = fetch_documents()
 ```
@@ -80,7 +80,7 @@ fetch_documents(
 Configuration is defined via the `Settings` dataclass:
 
 ```python
-from slimx_assistant.settings import Settings
+from slimx_rag.settings import Settings
 from pathlib import Path
 
 settings = Settings(

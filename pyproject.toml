@@ -3,7 +3,7 @@ requires = ["hatchling>=1.22.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "slimx-assistant"
+name = "slimx-rag"
 version = "0.1.0"
 description = "RAG implementation modules (ingest first) using LangChain"
 readme = "README.md"
@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-slimx-ingest = "slimx_assistant.ingest.cli:main"
+slimx-ingest = "slimx_rag.ingest.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -27,4 +27,4 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/slimx_assistant"]
+packages = ["src/slimx_rag"]
