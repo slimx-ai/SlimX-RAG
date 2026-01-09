@@ -69,7 +69,6 @@ def fetch_documents(
     logger.info(f"Loading documents from knowledge base at: {kb_dir}")
 
     for doc_type_dir in sorted(iter_subdirs(kb_dir)): # yield subdirs in a deterministic order
-        doc_type = doc_type_dir.name
         logger.debug(f"Scanning {doc_type_dir}")
 
         loader = DirectoryLoader(
