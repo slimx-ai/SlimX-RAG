@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,7 +15,7 @@ class IngestSettings:
 class ChunkSettings:
     chunk_size: int = 800
     chunk_overlap: int = 120
-    separators: Sequence[str] = ("\n\n", "\n", " ", "")
+    separators: tuple[str] = ("\n\n", "\n", " ", "") # ChangeSequence to tuple to emphasize immutability
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,3 +40,7 @@ class PipelineSettings:
     def validate(self) -> None:
         if self.chunk.chunk_overlap >= self.chunk.chunk_size:
             raise ValueError("chunk_overlap must be < chunk_size")
+        if self.chunk.chunk_size <= 0:
+            raise ValueError("chunk_size must be > 0")
+        if self.chunk.chunk_overlap < 0:
+            raise ValueError("chunk_overlap must be >= 0")
