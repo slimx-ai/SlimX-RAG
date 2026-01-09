@@ -1,75 +1,69 @@
-from __future__ import annotations 
+from __future__ import annotations
 
-import logging
 import hashlib
+import logging
 from pathlib import Path
-from typing import List, Iterable, Optional
+from typing import Iterable, List, Optional
 
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_core.documents import Document
 
-from slimx_rag.settings import Settings
+from slimx_rag.settings import IndexingSettings
 
 logger = logging.getLogger(__name__)
 
 
 def iter_subdirs(kb_dir: Path) -> Iterable[Path]:
     """Yield subdirectories of kb_dir representing document types."""
-
-    if not kb_dir.exists(): 
+    if not kb_dir.exists():
         raise FileNotFoundError(f"Knowledge base directory not found: {kb_dir}")
     if not kb_dir.is_dir():
         raise NotADirectoryError(f"Knowledge base path is not a directory: {kb_dir}")
-    
+
     for p in kb_dir.iterdir():
         if p.is_dir():
             yield p
 
+
 def _hash_path(kb_relpath: str) -> str:
-    """Generate a short hash for a given relative path."""
-    h = hashlib.sha256(kb_relpath.encode("utf-8")).hexdigest()
-    return h[:16]
+    h = hashlib.blake2b(digest_size=32)
+    h.update(kb_relpath.encode("utf-8", errors="ignore"))
+    return h.hexdigest()
+
 
 def _doc_type_from_relpath(relpath: Path, depth: int) -> str:
     """Derive doc_type from relative path parts up to the given depth."""
-    parts = relpath.parts[:depth]
-    if len(parts) == 0:
-        return ""
-    d = max(1, depth)
-    return "/".join(parts[:d])
+    parts = relpath.parts[: max(1, depth)]
+    return "/".join(parts) if parts else ""
+
 
 def fetch_documents(
-        settings: Optional[Settings] = None,
-        *, 
-        kb_dir: Optional[Path] = None, 
-        glob: Optional[str] = None
-        ) -> List[Document]:
-    
+    settings: Optional[PipelineSettings] = None,
+    *,
+    kb_dir: Optional[Path] = None,
+    glob: Optional[str] = None,
+) -> List[Document]:
     """
-    Load documents from knowledge-base (subfolders).
+    Load documents from knowledge-base (subfolders) and attach stable metadata.
 
-    Metadata added:
-        if settings.doc_type_mode == "subdir":
-            - doc_type: subfolder name inside kb_dir
+    Baseline metadata (when source is available):
+      - kb_relpath
+      - file_ext
+      - doc_id
 
-    Args:
-      settings: Settings instance. If omitted, Settings.default() is used.
-      kb_dir: Direct override for the KB path (highest priority).
-      glob: Glob pattern passed to DirectoryLoader.
-
-    Returns:
-      List[Document]
+    Optional semantic metadata:
+      - doc_type (derived from folder structure; depth=1 means top-level folder)
     """
+    settings = settings or PipelineSettings()
+    settings.validate()
 
-    settings = settings or Settings.default()
     kb_dir = kb_dir or settings.kb_dir
-    glob = glob or settings.glob
+    glob = glob or settings.ingest.glob
 
     documents: List[Document] = []
     logger.info(f"Loading documents from knowledge base at: {kb_dir}")
 
-    for doc_type_dir in sorted(iter_subdirs(kb_dir)): # yield subdirs in a deterministic order
-        doc_type = doc_type_dir.name
+    for doc_type_dir in sorted(iter_subdirs(kb_dir)):  # deterministic directory order
         logger.debug(f"Scanning {doc_type_dir}")
 
         loader = DirectoryLoader(
@@ -77,33 +71,29 @@ def fetch_documents(
             glob=glob,
             loader_cls=TextLoader,
             loader_kwargs={"encoding": "utf-8"},
-            show_progress=True,
-            use_multithreading=True,
+            show_progress=settings.ingest.show_progress,
+            use_multithreading=settings.ingest.multithreading,
         )
 
         docs = loader.load()
 
         for d in docs:
-            # Baseline metadata: always set
-            # Many loaders already provide "source" metadata, but we normalize/enrich it
             source = d.metadata.get("source")
+            relpath: Optional[Path] = None
 
             if source:
                 source_path = Path(source)
-                relpath = source_path.relative_to(kb_dir) if kb_dir in source_path.parents else None
-            else:
-                relpath = None
+                if kb_dir in source_path.parents:
+                    relpath = source_path.relative_to(kb_dir)
 
             if relpath is not None:
                 d.metadata["kb_relpath"] = str(relpath)
                 d.metadata["file_ext"] = relpath.suffix.lower().lstrip(".")
                 d.metadata["doc_id"] = _hash_path(str(relpath))
 
-                if settings.doc_type_mode == "subdir":
-                    d.metadata["doc_type"] = _doc_type_from_relpath(
-                        relpath,
-                        settings.doc_type_depth,)
-            
+                # If you later add doc_type control, wire it here; for now doc_type is always derived
+                d.metadata["doc_type"] = _doc_type_from_relpath(relpath, depth=1)
+
         documents.extend(docs)
 
     logger.info(f"Fetched {len(documents)} documents from knowledge base.")

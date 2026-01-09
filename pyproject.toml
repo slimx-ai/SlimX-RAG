@@ -15,11 +15,12 @@ authors = [
 dependencies = [
   "langchain-community>=0.4,<1",
   "langchain-core>=1.2,<2",
+  "langchain-text-splitters>=1",
   "tqdm>=4.66",
 ]
 
 [project.scripts]
-slimx-ingest = "slimx_rag.ingest.cli:main"
+slimx = "slimx_rag.cli:main"
 
 [project.optional-dependencies]
 dev = [
