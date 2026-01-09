@@ -15,7 +15,7 @@ class IngestSettings:
 class ChunkSettings:
     chunk_size: int = 800
     chunk_overlap: int = 120
-    separators: tuple[str] = ("\n\n", "\n", " ", "") # ChangeSequence to tuple to emphasize immutability
+    separators: tuple[str, ...] = ("\n\n", "\n", " ", "") # Change Sequence to tuple to emphasize immutability
 
 
 @dataclass(frozen=True, slots=True)
