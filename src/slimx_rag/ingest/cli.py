@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from slimx_rag.ingest.loader import fetch_documents
-from slimx_rag.settings import Settings
+from slimx_rag.settings import IndexingSettings
 
 
 
@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     configure_logging(args.verbose)
-    settings = Settings.default()
+    settings = IndexingSettings.default()
     documents = fetch_documents(
         settings=settings,
         kb_dir=args.kb_dir,

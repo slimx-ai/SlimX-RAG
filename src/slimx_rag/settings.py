@@ -15,11 +15,12 @@ class IngestSettings:
 class ChunkSettings:
     chunk_size: int = 800
     chunk_overlap: int = 120
+    extended_metadata: bool = True
     separators: tuple[str, ...] = ("\n\n", "\n", " ", "") # Change Sequence to tuple to emphasize immutability
 
 
 @dataclass(frozen=True, slots=True)
-class PipelineSettings:
+class IndexingSettings:
     kb_dir: Path = Path("./knowledge-base")
     out_dir: Path = Path("./output")
 

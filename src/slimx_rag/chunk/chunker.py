@@ -9,31 +9,30 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 def _stable_doc_sort_key(doc: Document) -> Tuple[str, str]:
     """
-    Deterministic sort key for documents.
+    Build a deterministic sort key for documents.
 
-    Why:
-    - Filesystem loaders can return docs in non-stable order (OS differences,
-      multithreading, etc.).
-    - Sorting ensures chunk output stays stable run-to-run.
+    We prefer metadata["kb_relpath"] when present because it is stable and
+    independent of absolute paths. Fall back to metadata["source"].
     """
-    src = str(doc.metadata.get("source", ""))
+    src = str(doc.metadata.get("kb_relpath") or doc.metadata.get("source") or "")
     doc_type = str(doc.metadata.get("doc_type", ""))
     return (src, doc_type)
 
 
-def _make_chunk_id(parent_source: str, chunk_index: int, chunk_text: str) -> str:
+def _make_chunk_id(parent_id: str, chunk_index: int, chunk_text: str) -> str:
     """
-    Stable unique ID for a chunk.
+    Create a stable chunk ID.
 
-    Uses BLAKE2b hash over: (parent_source, chunk_index, chunk_text)
+    Non-security use-case: fingerprinting / caching / deduping.
+    BLAKE2b is fast and supports a short digest size.
     """
-    hasher = hashlib.blake2b(digest_size=16)
-    hasher.update(parent_source.encode("utf-8", errors="ignore"))
-    hasher.update(b"\n")
-    hasher.update(str(chunk_index).encode("utf-8", errors="ignore"))
-    hasher.update(b"\n")
-    hasher.update(chunk_text.encode("utf-8", errors="ignore"))
-    return hasher.hexdigest()
+    h = hashlib.blake2b(digest_size=16)
+    h.update(parent_id.encode("utf-8", errors="ignore"))
+    h.update(b"\n")
+    h.update(str(chunk_index).encode("utf-8"))
+    h.update(b"\n")
+    h.update(chunk_text.encode("utf-8", errors="ignore"))
+    return h.hexdigest()
 
 
 def chunk_documents(
@@ -42,16 +41,29 @@ def chunk_documents(
     chunk_size: int = 800,
     chunk_overlap: int = 120,
     separators: Sequence[str] = ("\n\n", "\n", " ", ""),
-    add_position_chunk_metadata: bool = True,
+    extended_chunk_metadata: bool = True,
 ) -> List[Document]:
     """
-    Split documents into deterministic chunks for embedding and retrieval.
+    Split Documents into deterministic chunks for embedding/retrieval.
 
     Determinism strategy:
-    1) Sort docs by stable metadata.
-    2) Use deterministic splitter for same text/settings.
-    3) Add stable chunk_id per chunk.
+      - sort input docs by stable key (kb_relpath/source + doc_type)
+      - RecursiveCharacterTextSplitter is deterministic for same text/settings
+      - chunk_id is stable hash of (parent_id, chunk_index, chunk_text)
+
+    Metadata:
+      - preserves all parent metadata on each chunk
+      - optionally adds: chunk_index, parent_doc_id, parent_kb_relpath,
+        parent_doc_type, chunk_id
     """
+    # Validate params (mirror IndexingSettings.validate logic for safety)
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be > 0")
+    if chunk_overlap < 0:
+        raise ValueError("chunk_overlap must be >= 0")
+    if chunk_overlap >= chunk_size:
+        raise ValueError("chunk_overlap must be < chunk_size")
+
     docs_list = list(docs)
     docs_list.sort(key=_stable_doc_sort_key)
 
@@ -62,21 +74,25 @@ def chunk_documents(
     )
 
     out: List[Document] = []
-
     for doc in docs_list:
-        parent_source = str(doc.metadata.get("source", ""))
+        parent_doc_id = str(doc.metadata.get("doc_id", ""))  # from ingest
+        parent_kb_relpath = str(doc.metadata.get("kb_relpath", ""))  # from ingest
+        parent_doc_type = str(doc.metadata.get("doc_type", ""))  # from ingest
+        parent_id_for_hash = parent_doc_id or parent_kb_relpath or str(doc.metadata.get("source", ""))
+
         splits = splitter.split_text(doc.page_content or "")
 
-        for chunk_index, chunk_text in enumerate(splits):
-            chunk_metadata = dict(doc.metadata)
 
-            if add_position_chunk_metadata:
-                chunk_metadata["chunk_index"] = chunk_index
-                chunk_metadata["parent_source"] = parent_source
-            
-            # Add stable chunk_id
-            chunk_metadata["chunk_id"] = _make_chunk_id(parent_source, chunk_index, chunk_text)
+        for i, text in enumerate(splits):
+            md = dict(doc.metadata)  # preserve ingest metadata
+            # always add chunk_id for deduping/caching purposes
+            md["chunk_id"] = _make_chunk_id(parent_id_for_hash, i, text)
+            if extended_chunk_metadata:
+                md["chunk_index"] = i
+                md["parent_doc_id"] = parent_doc_id
+                md["parent_kb_relpath"] = parent_kb_relpath
+                md["parent_doc_type"] = parent_doc_type
 
-            out.append(Document(page_content=chunk_text, metadata=chunk_metadata))
+            out.append(Document(page_content=text, metadata=md))
 
     return out
