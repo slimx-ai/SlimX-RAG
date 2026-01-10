@@ -37,12 +37,7 @@ def _doc_type_from_relpath(relpath: Path, depth: int) -> str:
     return "/".join(parts) if parts else ""
 
 
-def fetch_documents(
-    settings: Optional[PipelineSettings] = None,
-    *,
-    kb_dir: Optional[Path] = None,
-    glob: Optional[str] = None,
-) -> List[Document]:
+def fetch_documents(settings: IndexingSettings) -> List[Document]:
     """
     Load documents from knowledge-base (subfolders) and attach stable metadata.
 
@@ -54,12 +49,10 @@ def fetch_documents(
     Optional semantic metadata:
       - doc_type (derived from folder structure; depth=1 means top-level folder)
     """
-    settings = settings or PipelineSettings()
     settings.validate()
 
-    kb_dir = kb_dir or settings.kb_dir
-    glob = glob or settings.ingest.glob
-
+    kb_dir = settings.kb_dir
+    glob = settings.ingest.glob
     documents: List[Document] = []
     logger.info(f"Loading documents from knowledge base at: {kb_dir}")
 
