@@ -25,10 +25,20 @@ def iter_subdirs(kb_dir: Path) -> Iterable[Path]:
             yield p
 
 
-def _hash_path(kb_relpath: str) -> str:
-    h = hashlib.blake2b(digest_size=32)
-    h.update(kb_relpath.encode("utf-8", errors="ignore"))
+def _hash_text(text: str, *, digest_size: int) -> str:
+    h = hashlib.blake2b(digest_size=digest_size)
+    h.update(text.encode("utf-8"))
     return h.hexdigest()
+
+
+def _hash_path(kb_relpath: str) -> str:
+    # doc identity: stable across edits as long as path stays stable
+    return _hash_text(kb_relpath, digest_size=32)
+
+
+def _content_hash(text: str) -> str:
+    # doc version fingerprint: changes when content changes (supports incremental indexing later)
+    return _hash_text(text or "", digest_size=16)
 
 
 def _doc_type_from_relpath(relpath: Path, depth: int) -> str:
@@ -37,17 +47,27 @@ def _doc_type_from_relpath(relpath: Path, depth: int) -> str:
     return "/".join(parts) if parts else ""
 
 
+def _fallback_doc_id(source: str, content_hash: str) -> str:
+    # identity for docs with no stable kb_relpath: stable for same source+content
+    payload = f"fallback\n{source}\n{content_hash}"
+    return _hash_text(payload, digest_size=32)
+
+
 def fetch_documents(settings: IndexingSettings) -> List[Document]:
     """
     Load documents from knowledge-base (subfolders) and attach stable metadata.
 
-    Baseline metadata (when source is available):
-      - kb_relpath
-      - file_ext
-      - doc_id
+    Baseline metadata (always set):
+      - doc_id          (stable identity; relpath-based when possible)
+      - content_hash    (version fingerprint; changes when content changes)
+      - content_len     (chars)
+      - doc_type        (folder-derived when possible, else "unknown")
+      - file_ext        (when discoverable)
+      - kb_relpath      (when discoverable)
 
-    Optional semantic metadata:
-      - doc_type (derived from folder structure; depth=1 means top-level folder)
+    Notes:
+      - doc_id is *identity* (path-based when possible)
+      - content_hash is *version* (content-based)
     """
     settings.validate()
 
@@ -71,21 +91,36 @@ def fetch_documents(settings: IndexingSettings) -> List[Document]:
         docs = loader.load()
 
         for d in docs:
-            source = d.metadata.get("source")
+            source = str(d.metadata.get("source") or "")
             relpath: Optional[Path] = None
 
             if source:
                 source_path = Path(source)
+                # Best-effort: attach a stable relpath when source is under kb_dir
                 if kb_dir in source_path.parents:
                     relpath = source_path.relative_to(kb_dir)
 
+            # Always compute version fingerprint (B)
+            text = d.page_content or ""
+            d.metadata["content_hash"] = _content_hash(text)
+            d.metadata["content_len"] = len(text)
+
+            # Prefer stable identity from relpath; otherwise fall back (A)
             if relpath is not None:
-                d.metadata["kb_relpath"] = str(relpath)
+                d.metadata["kb_relpath"] = relpath.as_posix() # consistent slashes across OSes
                 d.metadata["file_ext"] = relpath.suffix.lower().lstrip(".")
                 d.metadata["doc_id"] = _hash_path(str(relpath))
-
-                # If you later add doc_type control, wire it here; for now doc_type is always derived
                 d.metadata["doc_type"] = _doc_type_from_relpath(relpath, depth=1)
+            else:
+                # No relpath => still guarantee minimal metadata
+                d.metadata.setdefault("kb_relpath", "")
+                if "file_ext" not in d.metadata:
+                    try:
+                        d.metadata["file_ext"] = Path(source).suffix.lower().lstrip(".") if source else ""
+                    except Exception:
+                        d.metadata["file_ext"] = ""
+                d.metadata["doc_id"] = _fallback_doc_id(source, d.metadata["content_hash"])
+                d.metadata.setdefault("doc_type", "unknown")
 
         documents.extend(docs)
 
