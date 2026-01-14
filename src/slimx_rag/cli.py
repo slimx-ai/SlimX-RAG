@@ -8,8 +8,8 @@ from typing import Iterable, List
 from langchain_core.documents import Document
 
 from slimx_rag.ingest.loader import fetch_documents
-from slimx_rag.chunk import chunk_documents, ChunkSettings
-from slimx_rag.settings import PipelineSettings, IngestSettings
+from slimx_rag.chunk import chunk_documents
+from slimx_rag.settings import IndexingSettings, IngestSettings, ChunkSettings
 
 
 def _write_jsonl(docs: Iterable[Document], out_path: Path) -> None:
@@ -37,22 +37,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ingest
     pi = sub.add_parser("ingest", help="Load KB documents and write docs.jsonl")
-    pi.add_argument("--kb-dir", type=Path, default=PipelineSettings().kb_dir)
+    pi.add_argument("--kb-dir", type=Path, default=IndexingSettings().kb_dir)
     pi.add_argument("--glob", type=str, default=IngestSettings().glob)
-    pi.add_argument("--out", type=Path, default=PipelineSettings().docs_path)
+    pi.add_argument("--out", type=Path, default=IndexingSettings().docs_path)
 
     # chunk
     pc = sub.add_parser("chunk", help="Chunk docs.jsonl into chunks.jsonl")
     pc.add_argument("--in", dest="in_path", type=Path, required=True)
-    pc.add_argument("--out", type=Path, default=PipelineSettings().chunks_path)
+    pc.add_argument("--out", type=Path, default=IndexingSettings().chunks_path)
     pc.add_argument("--chunk-size", type=int, default=ChunkSettings().chunk_size)
     pc.add_argument("--chunk-overlap", type=int, default=ChunkSettings().chunk_overlap)
 
     # run
     pr = sub.add_parser("run", help="Run ingest -> chunk")
-    pr.add_argument("--kb-dir", type=Path, default=PipelineSettings().kb_dir)
+    pr.add_argument("--kb-dir", type=Path, default=IndexingSettings().kb_dir)
     pr.add_argument("--glob", type=str, default=IngestSettings().glob)
-    pr.add_argument("--out-dir", type=Path, default=PipelineSettings().out_dir)
+    pr.add_argument("--out-dir", type=Path, default=IndexingSettings().out_dir)
     pr.add_argument("--chunk-size", type=int, default=ChunkSettings().chunk_size)
     pr.add_argument("--chunk-overlap", type=int, default=ChunkSettings().chunk_overlap)
 
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.cmd == "ingest":
-        settings = PipelineSettings(kb_dir=args.kb_dir, ingest=IngestSettings(glob=args.glob))
+        settings = IndexingSettings(kb_dir=args.kb_dir, ingest=IngestSettings(glob=args.glob))
         docs = fetch_documents(settings=settings)
         _write_jsonl(docs, args.out)
         print(f"Wrote {args.out}")
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "run":
-        settings = PipelineSettings(
+        settings = IndexingSettings(
             kb_dir=args.kb_dir,
             out_dir=args.out_dir,
             ingest=IngestSettings(glob=args.glob),
