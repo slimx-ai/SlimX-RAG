@@ -160,46 +160,65 @@ def embed_chunks(
     batch_texts: List[str] = []
 
     def flush() -> Iterator[EmbeddedChunk]:
+        """Embed the currently buffered batch and yield EmbeddedChunk records."""
+        nonlocal batch_docs, batch_texts
+
         if not batch_docs:
-            return iter(())
-        # Normalize text upfront so embedding input is stable and safe.
+            return  # nothing to do
+
+        # Normalize/truncate once per flush (not per retry).
         texts = [
             _normalize_text(t, max_chars=settings.max_chars, normalize=settings.normalize_text)
             for t in batch_texts
         ]
 
-        last_err: Optional[Exception] = None
-        for attempt in range(settings.retries):
-            try:
-                vectors = embedder.embed_texts(texts)
-                _validate_vectors(vectors, expected_dim=(settings.dim if settings.provider == "hash" else None), count=len(texts))
-                for d, v, t_in in zip(batch_docs, vectors, texts):
-                    md = dict(d.metadata)
-                    cid = str(md.get("chunk_id") or "")
-                    if not cid:
-                        raise ValueError("Chunk is missing metadata['chunk_id']")
-                    yield EmbeddedChunk(
-                        chunk_id=cid,
-                        vector=[float(x) for x in v],
-                        text=t_in,
-                        metadata=md,
+        try:
+            last_err: Optional[Exception] = None
+
+            for attempt in range(settings.retries):
+                try:
+                    vectors = embedder.embed_texts(texts)
+
+                    _validate_vectors(
+                        vectors,
+                        expected_dim=(settings.dim if settings.provider == "hash" else None),
+                        count=len(texts),
                     )
-                return iter(())
-            except Exception as e:  # pragma: no cover (depends on provider/runtime)
-                last_err = e
-                # Simple exponential backoff
-                if attempt < settings.retries - 1:
-                    time.sleep(settings.retry_backoff_s * (2 ** attempt))
-                else:
-                    raise RuntimeError(f"Embedding failed after {settings.retries} attempts") from last_err
-        return iter(())
+
+                    for d, v, t_in in zip(batch_docs, vectors, texts):
+                        md = dict(d.metadata)
+                        cid = str(md.get("chunk_id") or "")
+                        if not cid:
+                            raise ValueError("Chunk is missing metadata['chunk_id']")
+
+                        yield EmbeddedChunk(
+                            chunk_id=cid,
+                            vector=[float(x) for x in v],
+                            text=t_in,
+                            metadata=md,
+                        )
+
+                    return  # success => stop retry loop + end generator
+
+                except Exception as e:
+                    last_err = e
+                    if attempt < settings.retries - 1:
+                        time.sleep(settings.retry_backoff_s * (2 ** attempt))
+                        continue
+                    raise RuntimeError(
+                        f"Embedding failed after {settings.retries} attempts"
+                    ) from last_err
+
+        finally:
+            # Always clear the batch, whether success or failure
+            batch_docs.clear()
+            batch_texts.clear()
+
 
     for d in chunks:
         batch_docs.append(d)
         batch_texts.append(d.page_content or "")
         if len(batch_docs) >= bs:
             yield from flush()
-            batch_docs.clear()
-            batch_texts.clear()
 
     yield from flush()
