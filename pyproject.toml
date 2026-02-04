@@ -1,31 +1,41 @@
+[project]
+name = "slimx-rag"
+version = "0.1.0"
+description = "SlimX-RAG: a slim, deterministic RAG indexing pipeline (ingest -> chunk -> embed -> index)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "langchain-core>=0.2.0",
+  "langchain-community>=0.2.0",
+  "langchain-text-splitters>=0.2.0",
+
+  # Avoid yanked numpy 2.4.0 pulled transitively in some environments
+  "numpy<2.4.0",
+]
+
+[project.optional-dependencies]
+openai = [
+  "langchain-openai>=0.1.0",
+]
+hf = [
+  "sentence-transformers>=2.2.2",
+]
+faiss = [
+  "faiss-cpu>=1.7.4",
+]
+qdrant = [
+  "qdrant-client>=1.7.0",
+]
+pgvector = [
+  "psycopg[binary]>=3.1.0",
+]
+
+[project.scripts]
+slimx-rag = "slimx_rag.cli:main"
+
 [build-system]
 requires = ["hatchling>=1.22.0"]
 build-backend = "hatchling.build"
 
-[project]
-name = "slimx-rag"
-version = "0.1.0"
-description = "RAG implementation modules (ingest first) using LangChain"
-readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [
-  { name = "SlimX Team", email = "info@slimx.ai" },
-]
-dependencies = [
-  "langchain-community>=0.4,<1",
-  "langchain-core>=1.2,<2",
-  "langchain-text-splitters>=1",
-  "tqdm>=4.66",
-]
-
-[project.scripts]
-slimx = "slimx_rag.cli:main"
-
-[project.optional-dependencies]
-dev = [
-  "pytest>=8.0",
-]
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/slimx_rag"]
+[tool.uv]
+package = true
