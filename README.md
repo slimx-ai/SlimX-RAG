@@ -1,41 +1,120 @@
 # SlimX-RAG
 
-A modular, testable RAG pipeline implementation.
+A slim, deterministic RAG indexing pipeline:
 
-Current modules:
-- **ingest**: load documents from a local knowledge base and attach stable metadata
-- **chunk**: split documents into deterministic chunks suitable for embedding/retrieval
+**ingest → chunk → embed → index → query**
 
-## Install (dev)
+This repo intentionally focuses on *mechanics* (determinism, incremental indexing, clean contracts)
+before swapping in heavier backends.
 
-```bash
-uv sync --extra -dev
-```
-or 
+## Install (uv)
 
 ```bash
-uv venv
-uv pip install -e ".[dev]"
+uv sync
 ```
 
-## Ingest
+Optional providers:
 
 ```bash
-slimx-ingest --kb-dir ./knowledge-base
+uv sync --extra openai   # OpenAI embeddings (requires OPENAI_API_KEY)
+uv sync --extra hf       # HuggingFace SentenceTransformers embeddings
 ```
 
-See: `src/slimx_rag/ingest/README.md`
+## Quickstart
 
-## Chunk
+### 1) Ingest + chunk + index
 
 ```bash
-slimx-chunk --kb-dir ./knowledge-base --out ./output/chunks.jsonl
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output
 ```
 
-See: `src/slimx_rag/chunk/README.md`
+This produces:
 
-## Tests
+- `output/docs.jsonl`
+- `output/chunks.jsonl`
+- `output/index.jsonl`
+- `output/index_state.json` (incremental state + embed config)
+
+### 2) Query
 
 ```bash
-uv run pytest -q
+slimx-rag query --index ./output/index.jsonl --q "What is this project?" --k 5
 ```
+
+By default, the pipeline uses a deterministic **hash embedder** so it runs offline.
+For real semantics, choose an embedding provider:
+
+#### OpenAI embeddings
+```bash
+export OPENAI_API_KEY="..."
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --embed-provider openai --embed-model text-embedding-3-small
+```
+
+#### HuggingFace embeddings (SentenceTransformers)
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --embed-provider hf --hf-model sentence-transformers/all-MiniLM-L6-v2
+```
+
+## Index backends (plugins)
+
+For the developer-facing plugin contract and conventions, see: `src/slimx_rag/index/README.md`.
+
+The indexing layer is implemented as a **backend plugin** so you can switch storage/search engines without changing pipeline code.
+
+Supported backends:
+
+- `local` — JSONL MVP backend (default): portable, deterministic, loads in-memory for query
+- `faiss` — local FAISS index (binary) + JSON sidecar for payloads (optional extra)
+- `qdrant` — remote Qdrant collection (optional extra)
+- `pgvector` — Postgres + pgvector table (optional extra)
+
+Developer spec for implementing new backends: see `src/slimx_rag/index/README.md`.
+
+### Install optional backends
+
+```bash
+uv sync --extra faiss
+uv sync --extra qdrant
+uv sync --extra pgvector
+```
+
+### CLI usage
+
+Local (default):
+
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output --index-backend local
+```
+
+FAISS (recommend using an `.faiss` filename):
+
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --index-backend faiss \
+  --backend-config '{"dim": 384}'
+```
+
+Qdrant:
+
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --index-backend qdrant \
+  --backend-config '{"url":"http://localhost:6333","collection":"slimx"}'
+```
+
+pgvector:
+
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --index-backend pgvector \
+  --backend-config '{"dsn":"postgresql://user:pass@localhost:5432/db","table":"slimx_vectors"}'
+```
+
+## Notes
+
+- Chunk IDs are deterministic and intended for caching/dedup.
+- `index_state.json` tracks `doc_id → content_hash → chunk_ids` so the index can delete stale chunks on updates.
+- Backends store vectors + payloads differently, but all implement the same interface (`IndexBackend`).
+
