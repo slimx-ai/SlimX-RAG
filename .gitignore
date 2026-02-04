@@ -21,6 +21,7 @@ venv/
 # Builds
 dist/
 build/
+output/
 *.egg-info/
 
 # uv
