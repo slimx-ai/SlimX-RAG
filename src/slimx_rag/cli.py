@@ -73,7 +73,9 @@ def main(argv: list[str] | None = None) -> int:
         docs = _read_jsonl(args.in_path)
         chunks = chunk_documents(
             docs,
-            settings=ChunkSettings(chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap),
+            chunk_size=args.chunk_size, 
+            chunk_overlap=args.chunk_overlap,
+            separators=ChunkSettings().separators,
         )
         _write_jsonl(chunks, args.out)
         print(f"Wrote {args.out}")
@@ -91,7 +93,12 @@ def main(argv: list[str] | None = None) -> int:
         docs = fetch_documents(settings=settings)
         _write_jsonl(docs, settings.docs_path)
 
-        chunks = chunk_documents(docs, settings=settings.chunk)
+        chunks = chunk_documents(
+            docs,
+            chunk_size=args.chunk_size, 
+            chunk_overlap=args.chunk_overlap,
+            separators=ChunkSettings().separators,
+        )
         _write_jsonl(chunks, settings.chunks_path)
 
         print(f"Wrote {settings.docs_path}")
