@@ -15,6 +15,7 @@ venv/
 
 # OS/Editor
 .DS_Store
+**/.DS_Store
 .vscode/
 .idea/
 
