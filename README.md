@@ -1,41 +1,65 @@
 # SlimX-RAG
 
-A modular, testable RAG pipeline implementation.
+A slim, deterministic RAG indexing pipeline:
 
-Current modules:
-- **ingest**: load documents from a local knowledge base and attach stable metadata
-- **chunk**: split documents into deterministic chunks suitable for embedding/retrieval
+**ingest → chunk → embed → index → query**
 
-## Install (dev)
+This repo intentionally focuses on *mechanics* (determinism, incremental indexing, clean contracts)
+before swapping in heavier backends.
 
-```bash
-uv sync --extra -dev
-```
-or 
+## Install (uv)
 
 ```bash
-uv venv
-uv pip install -e ".[dev]"
+uv sync
 ```
 
-## Ingest
+Optional providers:
 
 ```bash
-slimx-ingest --kb-dir ./knowledge-base
+uv sync --extra openai   # OpenAI embeddings (requires OPENAI_API_KEY)
+uv sync --extra hf       # HuggingFace SentenceTransformers embeddings
 ```
 
-See: `src/slimx_rag/ingest/README.md`
+## Quickstart
 
-## Chunk
+### 1) Ingest + chunk + index
 
 ```bash
-slimx-chunk --kb-dir ./knowledge-base --out ./output/chunks.jsonl
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output
 ```
 
-See: `src/slimx_rag/chunk/README.md`
+This produces:
 
-## Tests
+- `output/docs.jsonl`
+- `output/chunks.jsonl`
+- `output/index.jsonl`
+- `output/index_state.json` (incremental state + embed config)
+
+### 2) Query
 
 ```bash
-uv run pytest -q
+slimx-rag query --index ./output/index.jsonl --q "What is this project?" --k 5
 ```
+
+By default, the pipeline uses a deterministic **hash embedder** so it runs offline.
+For real semantics, choose an embedding provider:
+
+#### OpenAI embeddings
+```bash
+export OPENAI_API_KEY="..."
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --embed-provider openai --embed-model text-embedding-3-small
+```
+
+#### HuggingFace embeddings (SentenceTransformers)
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --embed-provider hf --hf-model sentence-transformers/all-MiniLM-L6-v2
+```
+
+## Notes
+
+- Chunk IDs are deterministic and intended for caching/dedup.
+- `index_state.json` tracks `doc_id → content_hash → chunk_ids` so the index can delete stale chunks on updates.
+- `index.jsonl` is a simple local MVP backend; it loads in-memory for query. For larger corpora, swap to FAISS/Qdrant/pgvector.
+
