@@ -23,6 +23,7 @@ venv/
 dist/
 build/
 *.egg-info/
+output/
 
 # uv
 uv.lock
