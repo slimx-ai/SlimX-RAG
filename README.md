@@ -34,6 +34,7 @@ uv sync --extra hf       # SentenceTransformers embeddings
 
 ```bash
 python -m pip install -e ".[dev]"
+source venv/bin/activate  # or your venv path
 ```
 
 ---
@@ -60,11 +61,19 @@ knowledge-base/
     overview.md
 ```
 
-2) Run:
+2) Activate the venv:
 
 ```bash
-uv run slimx-rag run --kb-dir ./knowledge-base --out-dir ./output
+source .venv/bin/activate
 ```
+
+Then run:
+
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output
+```
+
+(Or use `uv run slimx-rag run ...` without activating)
 
 Outputs:
 
@@ -80,7 +89,7 @@ Outputs:
 ### 1) Ingest
 
 ```bash
-uv run slimx-rag ingest --kb-dir ./knowledge-base --out ./output/docs.jsonl
+slimx-rag ingest --kb-dir ./knowledge-base --out ./output/docs.jsonl
 ```
 
 Defaults:
@@ -89,13 +98,13 @@ Defaults:
 Override the glob:
 
 ```bash
-uv run slimx-rag ingest --kb-dir ./knowledge-base --glob "**/*.txt" --out ./output/docs.jsonl
+slimx-rag ingest --kb-dir ./knowledge-base --glob "**/*.txt" --out ./output/docs.jsonl
 ```
 
 ### 2) Chunk
 
 ```bash
-uv run slimx-rag chunk --in ./output/docs.jsonl --out ./output/chunks.jsonl \
+slimx-rag chunk --in ./output/docs.jsonl --out ./output/chunks.jsonl \
   --chunk-size 800 --chunk-overlap 120
 ```
 
@@ -104,23 +113,20 @@ uv run slimx-rag chunk --in ./output/docs.jsonl --out ./output/chunks.jsonl \
 Offline deterministic embeddings (good for CI/dev; **not semantic**):
 
 ```bash
-uv run slimx embed --in ./output/chunks.jsonl --out ./output/embeddings.jsonl \
-  --embed-provider hash --embed-dim 384
+slimx-rag index --in ./output/chunks.jsonl --embed-provider hash --embed-dim 384
 ```
 
 OpenAI embeddings:
 
 ```bash
 export OPENAI_API_KEY="..."
-uv run slimx embed --in ./output/chunks.jsonl --out ./output/embeddings.jsonl \
-  --embed-provider openai --embed-model text-embedding-3-small
+slimx-rag index --in ./output/chunks.jsonl --embed-provider openai --embed-model text-embedding-3-small
 ```
 
 HuggingFace SentenceTransformers:
 
 ```bash
-uv run slimx embed --in ./output/chunks.jsonl --out ./output/embeddings.jsonl \
-  --embed-provider hf --hf-model sentence-transformers/all-MiniLM-L6-v2
+slimx-rag index --in ./output/chunks.jsonl --embed-provider hf --hf-model sentence-transformers/all-MiniLM-L6-v2
 ```
 
 ### 4) Index
