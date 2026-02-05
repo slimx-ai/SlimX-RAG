@@ -15,6 +15,11 @@ This project is packaged as `slimx-rag` and ships a CLI called **`slimx`**.
 ### With `uv` (recommended)
 
 ```bash
+uv sync
+```
+with extra dependencies 
+
+```bash
 uv sync --extra dev
 ```
 
@@ -58,7 +63,7 @@ knowledge-base/
 2) Run:
 
 ```bash
-uv run slimx run --kb-dir ./knowledge-base --out-dir ./output
+uv run slimx-rag run --kb-dir ./knowledge-base --out-dir ./output
 ```
 
 Outputs:
@@ -75,7 +80,7 @@ Outputs:
 ### 1) Ingest
 
 ```bash
-uv run slimx ingest --kb-dir ./knowledge-base --out ./output/docs.jsonl
+uv run slimx-rag ingest --kb-dir ./knowledge-base --out ./output/docs.jsonl
 ```
 
 Defaults:
@@ -84,13 +89,13 @@ Defaults:
 Override the glob:
 
 ```bash
-uv run slimx ingest --kb-dir ./knowledge-base --glob "**/*.txt" --out ./output/docs.jsonl
+uv run slimx-rag ingest --kb-dir ./knowledge-base --glob "**/*.txt" --out ./output/docs.jsonl
 ```
 
 ### 2) Chunk
 
 ```bash
-uv run slimx chunk --in ./output/docs.jsonl --out ./output/chunks.jsonl \
+uv run slimx-rag chunk --in ./output/docs.jsonl --out ./output/chunks.jsonl \
   --chunk-size 800 --chunk-overlap 120
 ```
 
@@ -120,18 +125,53 @@ uv run slimx embed --in ./output/chunks.jsonl --out ./output/embeddings.jsonl \
 
 ### 4) Index
 
-Build a small, dependency-free cosine index:
+The indexing layer is implemented as a **backend plugin** so you can switch storage/search engines without changing pipeline code.
+
+Supported backends:
+
+- `local` — JSONL MVP backend (default): portable, deterministic, loads in-memory for query
+- `faiss` — local FAISS index (binary) + JSON sidecar for payloads (optional extra)
+- `qdrant` — remote Qdrant collection (optional extra)
+- `pgvector` — Postgres + pgvector table (optional extra)
+
+### Install optional backends
 
 ```bash
-uv run slimx index --in ./output/embeddings.jsonl --out ./output/index.jsonl
+uv sync --extra faiss
+uv sync --extra qdrant
+uv sync --extra pgvector
 ```
 
-### 5) Query
+### CLI usage
 
-Search the index by embedding the query text with the same provider:
+Local (default):
 
 ```bash
-uv run slimx query --index ./output/index.jsonl --text "what is this knowledge base about" --top-k 5
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output --index-backend local
+```
+
+FAISS (recommend using an `.faiss` filename):
+
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --index-backend faiss \
+  --backend-config '{"dim": 384}'
+```
+
+Qdrant:
+
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --index-backend qdrant \
+  --backend-config '{"url":"http://localhost:6333","collection":"slimx"}'
+```
+
+pgvector:
+
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+  --index-backend pgvector \
+  --backend-config '{"dsn":"postgresql://user:pass@localhost:5432/db","table":"slimx_vectors"}'
 ```
 
 ---
