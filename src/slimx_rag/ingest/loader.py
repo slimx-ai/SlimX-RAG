@@ -8,7 +8,7 @@ from typing import Iterable, List, Optional
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_core.documents import Document
 
-from slimx_rag.settings import IndexingSettings
+from slimx_rag.settings import IndexingPipelineSettings
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ def _fallback_doc_id(source: str, content_hash: str) -> str:
     return _hash_text(payload, digest_size=32)
 
 
-def fetch_documents(settings: IndexingSettings) -> List[Document]:
+def fetch_documents(settings: IndexingPipelineSettings) -> List[Document]:
     """
     Load documents from knowledge-base (subfolders) and attach stable metadata.
 

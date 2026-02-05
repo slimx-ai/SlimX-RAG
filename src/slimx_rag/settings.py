@@ -69,7 +69,7 @@ class IndexSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class IndexingSettings:
+class IndexingPipelineSettings:
 
     kb_dir: Path = Path("knowledge-base")
     out_dir: Path = Path("output")

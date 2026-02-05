@@ -11,7 +11,7 @@ from slimx_rag.ingest.loader import fetch_documents
 from slimx_rag.chunk import chunk_documents
 from slimx_rag.embed import embed_chunks, make_embedder
 from slimx_rag.index import make_index_backend
-from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexingSettings, IngestSettings, IndexSettings
+from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexingPipelineSettings, IngestSettings, IndexSettings
 
 
 def _write_jsonl(docs: Iterable[Document], out_path: Path) -> None:
@@ -61,21 +61,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ingest
     pi = sub.add_parser("ingest", help="Load KB documents and write docs.jsonl")
-    pi.add_argument("--kb-dir", type=Path, default=IndexingSettings().kb_dir)
+    pi.add_argument("--kb-dir", type=Path, default=IndexingPipelineSettings().kb_dir)
     pi.add_argument("--glob", type=str, default=IngestSettings().glob)
-    pi.add_argument("--out", type=Path, default=IndexingSettings().docs_path)
+    pi.add_argument("--out", type=Path, default=IndexingPipelineSettings().docs_path)
 
     # chunk
     pc = sub.add_parser("chunk", help="Chunk docs.jsonl into chunks.jsonl")
     pc.add_argument("--in", dest="in_path", type=Path, required=True)
-    pc.add_argument("--out", type=Path, default=IndexingSettings().chunks_path)
+    pc.add_argument("--out", type=Path, default=IndexingPipelineSettings().chunks_path)
     pc.add_argument("--chunk-size", type=int, default=ChunkSettings().chunk_size)
     pc.add_argument("--chunk-overlap", type=int, default=ChunkSettings().chunk_overlap)
 
     # index
     px = sub.add_parser("index", help="Embed chunks.jsonl and build/update a local index.jsonl")
     px.add_argument("--in", dest="in_path", type=Path, required=True)
-    px.add_argument("--index", type=Path, default=IndexingSettings().index_path)
+    px.add_argument("--index", type=Path, default=IndexingPipelineSettings().index_path)
     px.add_argument("--state", type=Path, default=None)
     px.add_argument("--index-backend", type=str, default=IndexSettings().backend, choices=["local", "faiss", "qdrant", "pgvector"])
     px.add_argument("--backend-config", type=str, default="", help="JSON string with backend-specific config (e.g., {\"collection\": \"slimx\"})")
@@ -94,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # query
     pq = sub.add_parser("query", help="Search the local index.jsonl")
-    pq.add_argument("--index", type=Path, default=IndexingSettings().index_path)
+    pq.add_argument("--index", type=Path, default=IndexingPipelineSettings().index_path)
     pq.add_argument("--state", type=Path, default=None)
     pq.add_argument("--index-backend", type=str, default=IndexSettings().backend, choices=["local", "faiss", "qdrant", "pgvector"])
     pq.add_argument("--backend-config", type=str, default="", help="JSON string with backend-specific config")
@@ -103,9 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # run (ingest -> chunk -> index)
     pr = sub.add_parser("run", help="Run ingest -> chunk -> index")
-    pr.add_argument("--kb-dir", type=Path, default=IndexingSettings().kb_dir)
+    pr.add_argument("--kb-dir", type=Path, default=IndexingPipelineSettings().kb_dir)
     pr.add_argument("--glob", type=str, default=IngestSettings().glob)
-    pr.add_argument("--out-dir", type=Path, default=IndexingSettings().out_dir)
+    pr.add_argument("--out-dir", type=Path, default=IndexingPipelineSettings().out_dir)
     pr.add_argument("--chunk-size", type=int, default=ChunkSettings().chunk_size)
     pr.add_argument("--chunk-overlap", type=int, default=ChunkSettings().chunk_overlap)
 
@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.cmd == "ingest":
-        settings = IndexingSettings(kb_dir=args.kb_dir, ingest=IngestSettings(glob=args.glob))
+        settings = IndexingPipelineSettings(kb_dir=args.kb_dir, ingest=IngestSettings(glob=args.glob))
         settings.validate()
         docs = fetch_documents(settings=settings)
         _write_jsonl(docs, args.out)
@@ -151,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd in {"index", "run"}:
         # build settings from flags
         if args.cmd == "run":
-            settings = IndexingSettings(
+            settings = IndexingPipelineSettings(
                 kb_dir=args.kb_dir,
                 out_dir=args.out_dir,
                 ingest=IngestSettings(glob=args.glob),
