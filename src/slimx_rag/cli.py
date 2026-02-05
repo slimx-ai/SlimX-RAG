@@ -56,7 +56,7 @@ def _scan_chunks_for_state(in_path: Path) -> Dict[str, Tuple[str, List[str]]]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="slimx", description="SlimX-RAG CLI")
+    p = argparse.ArgumentParser(prog="slimx-rag", description="SlimX-RAG CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # ingest
