@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from slimx_rag.ingest.loader import fetch_documents
-from slimx_rag.settings import IndexingSettings
+from slimx_rag.settings import IndexingPipelineSettings
 
 
 def write(p: Path, text: str) -> None:
@@ -17,7 +17,7 @@ def test_fetch_documents_adds_doc_type_and_baseline_metadata(tmp_path: Path) -> 
     write(kb_dir / "company" / "about.md", "# About\nThis is the about page.")
     write(kb_dir / "products" / "features.md", "# Features\nThese are the features.")
 
-    settings = IndexingSettings(kb_dir=kb_dir)
+    settings = IndexingPipelineSettings(kb_dir=kb_dir)
     documents = fetch_documents(settings=settings)
 
     assert len(documents) == 2
@@ -43,7 +43,7 @@ def test_fetch_documents_baseline_metadata_exists(tmp_path: Path) -> None:
     kb_dir = tmp_path / "knowledge-base"
     write(kb_dir / "company" / "about.md", "# About\nThis is the about page.")
 
-    settings = IndexingSettings(kb_dir=kb_dir)
+    settings = IndexingPipelineSettings(kb_dir=kb_dir)
     documents = fetch_documents(settings=settings)
 
     assert len(documents) == 1
@@ -60,7 +60,7 @@ def test_fetch_documents_baseline_metadata_exists(tmp_path: Path) -> None:
 
 def test_fetch_documents_raises_if_missing_kb(tmp_path: Path) -> None:
     kb_dir = tmp_path / "nonexistent-kb"
-    settings = IndexingSettings(kb_dir=kb_dir)
+    settings = IndexingPipelineSettings(kb_dir=kb_dir)
 
     with pytest.raises(FileNotFoundError):
         fetch_documents(settings=settings)
@@ -70,7 +70,7 @@ def test_fetch_documents_raises_if_kb_is_file(tmp_path: Path) -> None:
     kb_file = tmp_path / "knowledge-base"
     kb_file.write_text("not a directory", encoding="utf-8")
 
-    settings = IndexingSettings(kb_dir=kb_file)
+    settings = IndexingPipelineSettings(kb_dir=kb_file)
 
     with pytest.raises(NotADirectoryError):
         fetch_documents(settings=settings)
