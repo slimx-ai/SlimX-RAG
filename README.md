@@ -41,11 +41,21 @@ source venv/bin/activate  # or your venv path
 
 ## Run the tests
 
+After installing with dev extras, activate the venv:
+
 ```bash
-uv run pytest
-# or
-uv run pytest -q
+source .venv/bin/activate
 ```
+
+Then run:
+
+```bash
+pytest
+# or
+pytest -q
+```
+
+(Or use `uv run pytest` without activating)
 
 ---
 
