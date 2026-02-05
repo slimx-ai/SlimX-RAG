@@ -1,65 +1,249 @@
 # SlimX-RAG
 
-A slim, deterministic RAG indexing pipeline:
+A slim, deterministic RAG *preprocessing* pipeline.
 
-**ingest → chunk → embed → index → query**
+What’s implemented today:
 
-This repo intentionally focuses on *mechanics* (determinism, incremental indexing, clean contracts)
-before swapping in heavier backends.
+**ingest → chunk → embed → index (+ query)**
 
-## Install (uv)
+---
 
-```bash
-uv sync
-```
+## Install
 
-Optional providers:
+This project is packaged as `slimx-rag` and ships a CLI called **`slimx`**.
 
-```bash
-uv sync --extra openai   # OpenAI embeddings (requires OPENAI_API_KEY)
-uv sync --extra hf       # HuggingFace SentenceTransformers embeddings
-```
-
-## Quickstart
-
-### 1) Ingest + chunk + index
+### With `uv` (recommended)
 
 ```bash
-slimx-rag run --kb-dir ./knowledge-base --out-dir ./output
+uv sync --extra dev
 ```
 
-This produces:
-
-- `output/docs.jsonl`
-- `output/chunks.jsonl`
-- `output/index.jsonl`
-- `output/index_state.json` (incremental state + embed config)
-
-### 2) Query
+Optional embedding providers:
 
 ```bash
-slimx-rag query --index ./output/index.jsonl --q "What is this project?" --k 5
+uv sync --extra openai   # OpenAI embeddings via langchain-openai
+uv sync --extra hf       # SentenceTransformers embeddings
 ```
 
-By default, the pipeline uses a deterministic **hash embedder** so it runs offline.
-For real semantics, choose an embedding provider:
+### With `pip`
 
-#### OpenAI embeddings
+```bash
+python -m pip install -e ".[dev]"
+```
+
+---
+
+## Run the tests
+
+```bash
+uv run pytest
+# or
+uv run pytest -q
+```
+
+---
+
+## Quickstart: run the full pipeline
+
+1) Put Markdown documents under a knowledge base folder:
+
+```text
+knowledge-base/
+  company/
+    about.md
+  products/
+    overview.md
+```
+
+2) Run:
+
+```bash
+uv run slimx run --kb-dir ./knowledge-base --out-dir ./output
+```
+
+Outputs:
+
+- `output/docs.jsonl` (raw documents + metadata)
+- `output/chunks.jsonl` (deterministic chunks)
+- `output/embeddings.jsonl` (vectors; default provider is offline `hash`)
+- `output/index.jsonl` (simple cosine index; for small corpora)
+
+---
+
+## Run modules one by one
+
+### 1) Ingest
+
+```bash
+uv run slimx ingest --kb-dir ./knowledge-base --out ./output/docs.jsonl
+```
+
+Defaults:
+- file pattern: `**/*.md`
+
+Override the glob:
+
+```bash
+uv run slimx ingest --kb-dir ./knowledge-base --glob "**/*.txt" --out ./output/docs.jsonl
+```
+
+### 2) Chunk
+
+```bash
+uv run slimx chunk --in ./output/docs.jsonl --out ./output/chunks.jsonl \
+  --chunk-size 800 --chunk-overlap 120
+```
+
+### 3) Embed
+
+Offline deterministic embeddings (good for CI/dev; **not semantic**):
+
+```bash
+uv run slimx embed --in ./output/chunks.jsonl --out ./output/embeddings.jsonl \
+  --embed-provider hash --embed-dim 384
+```
+
+OpenAI embeddings:
+
 ```bash
 export OPENAI_API_KEY="..."
-slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+uv run slimx embed --in ./output/chunks.jsonl --out ./output/embeddings.jsonl \
   --embed-provider openai --embed-model text-embedding-3-small
 ```
 
-#### HuggingFace embeddings (SentenceTransformers)
+HuggingFace SentenceTransformers:
+
 ```bash
-slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+uv run slimx embed --in ./output/chunks.jsonl --out ./output/embeddings.jsonl \
   --embed-provider hf --hf-model sentence-transformers/all-MiniLM-L6-v2
 ```
 
-## Notes
+### 4) Index
 
-- Chunk IDs are deterministic and intended for caching/dedup.
-- `index_state.json` tracks `doc_id → content_hash → chunk_ids` so the index can delete stale chunks on updates.
-- `index.jsonl` is a simple local MVP backend; it loads in-memory for query. For larger corpora, swap to FAISS/Qdrant/pgvector.
+Build a small, dependency-free cosine index:
+
+```bash
+uv run slimx index --in ./output/embeddings.jsonl --out ./output/index.jsonl
+```
+
+### 5) Query
+
+Search the index by embedding the query text with the same provider:
+
+```bash
+uv run slimx query --index ./output/index.jsonl --text "what is this knowledge base about" --top-k 5
+```
+
+---
+
+## Use as a Python library
+
+### Ingest
+
+```python
+from pathlib import Path
+from slimx_rag.ingest.loader import fetch_documents
+from slimx_rag.settings import IndexingSettings
+
+settings = IndexingSettings(kb_dir=Path("./knowledge-base"))
+docs = fetch_documents(settings=settings)
+print(len(docs), docs[0].metadata)
+```
+
+### Chunk
+
+```python
+from slimx_rag.chunk import chunk_documents
+from slimx_rag.settings import ChunkSettings
+
+cset = ChunkSettings(chunk_size=800, chunk_overlap=120)
+chunks = chunk_documents(
+    docs,
+    chunk_size=cset.chunk_size,
+    chunk_overlap=cset.chunk_overlap,
+    separators=cset.separators,
+    extended_chunk_metadata=cset.extended_metadata,
+)
+print(len(chunks), chunks[0].metadata["chunk_id"])
+```
+
+### Embed
+
+```python
+from slimx_rag.embed import embed_chunks
+from slimx_rag.settings import EmbedSettings
+
+eset = EmbedSettings(provider="hash", dim=384)
+embs = list(embed_chunks(chunks, settings=eset))
+print(embs[0].chunk_id, len(embs[0].vector))
+```
+
+### Index + Query
+
+```python
+from pathlib import Path
+from slimx_rag.index import NaiveIndex
+from slimx_rag.embed import make_embedder
+from slimx_rag.settings import EmbedSettings
+
+idx = NaiveIndex.load(Path("./output/index.jsonl"))
+eset = EmbedSettings(provider="hash", dim=idx.dim or 384)
+qvec = make_embedder(eset).embed_texts(["what is this knowledge base about"])[0]
+results = idx.search(list(map(float, qvec)), top_k=5)
+print(results[0].chunk_id, results[0].score)
+```
+
+---
+
+## Output formats
+
+### `docs.jsonl` and `chunks.jsonl`
+
+Each line is:
+
+```json
+{"page_content": "...", "metadata": {"doc_id": "...", "kb_relpath": "...", "content_hash": "..."}}
+```
+
+### `embeddings.jsonl`
+
+Each line is:
+
+```json
+{"chunk_id": "...", "vector": [0.1, -0.2, ...], "text": "...", "metadata": {"kb_relpath": "..."}}
+```
+
+### `index.jsonl`
+
+Each line is:
+
+```json
+{"chunk_id": "...", "vector": [0.1, -0.2, ...], "norm": 12.34, "text": "...", "metadata": {"kb_relpath": "..."}}
+```
+
+---
+
+## Design notes (why it’s deterministic)
+
+- **Ingest** assigns a stable `doc_id` primarily derived from `kb_relpath` (stable across machines).
+- **Ingest** also assigns `content_hash` derived from document text (changes when content changes).
+- **Chunking** sorts documents by a stable key (`kb_relpath/source/doc_id`) before splitting.
+- **Chunk IDs** are stable hashes of `(parent identity, content_hash, chunk config, chunk_index)`.
+- **Embedding** can be run offline (`hash`) so tests and CI don’t depend on network calls.
+- **Indexing** precomputes vector norms to make cosine search fast and deterministic.
+
+---
+
+## Project layout
+
+```text
+src/slimx_rag/
+  ingest/   # load docs + baseline metadata
+  chunk/    # deterministic splitting + chunk_id
+  embed/    # embedding providers + batching + retry
+  index/    # naive cosine index + query
+  settings.py
+  cli.py
+tests/
+```
 
