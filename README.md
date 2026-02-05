@@ -10,7 +10,7 @@ What’s implemented today:
 
 ## Install
 
-This project is packaged as `slimx-rag` and ships a CLI called **`slimx`**.
+This project is packaged as `slimx-rag` and ships a CLI command **`slimx-rag`**.
 
 ### With `uv` (recommended)
 
@@ -183,9 +183,9 @@ slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
 ```python
 from pathlib import Path
 from slimx_rag.ingest.loader import fetch_documents
-from slimx_rag.settings import IndexingSettings
+from slimx_rag.settings import IndexingPipelineSettings
 
-settings = IndexingSettings(kb_dir=Path("./knowledge-base"))
+settings = IndexingPipelineSettings(kb_dir=Path("./knowledge-base"))
 docs = fetch_documents(settings=settings)
 print(len(docs), docs[0].metadata)
 ```
