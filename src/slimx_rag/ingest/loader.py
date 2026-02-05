@@ -69,7 +69,13 @@ def fetch_documents(settings: IndexingPipelineSettings) -> List[Document]:
       - doc_id is *identity* (path-based when possible)
       - content_hash is *version* (content-based)
     """
-    settings.validate()
+
+    settings.ingest.validate()
+    if not settings.kb_dir.exists():
+        raise FileNotFoundError(f"kb_dir not found: {settings.kb_dir}")
+    if not settings.kb_dir.is_dir():
+        raise NotADirectoryError(f"kb_dir is not a directory: {settings.kb_dir}")
+
 
     kb_dir = settings.kb_dir
     glob = settings.ingest.glob
