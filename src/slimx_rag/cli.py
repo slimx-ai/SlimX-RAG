@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "ingest":
         settings = IndexingPipelineSettings(kb_dir=args.kb_dir, ingest=IngestSettings(glob=args.glob))
-        settings.validate()
+        settings.ingest.validate()
         docs = fetch_documents(settings=settings)
         _write_jsonl(docs, args.out)
         print(f"Wrote {args.out}")
