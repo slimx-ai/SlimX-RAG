@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Sequence 
+from typing import Sequence 
 
 @dataclass(frozen=True, slots=True)
 class IngestSettings:
@@ -10,62 +10,82 @@ class IngestSettings:
     multithreading: bool = False
     show_progress: bool = False
 
+    def validate(self) -> None:
+        if not self.glob or not self.glob.strip():
+            raise ValueError("ingest.glob must be a non-empty glob pattern")
+
 
 @dataclass(frozen=True, slots=True)
 class ChunkSettings:
     chunk_size: int = 800
     chunk_overlap: int = 120
     extended_metadata: bool = True
-    separators: tuple[str, ...] = ("\n\n", "\n", " ", "") # Change Sequence to tuple to emphasize immutability
+    separators: tuple[str, ...] = ("\n\n", "\n", " ", "")
+
+    def validate(self) -> None:
+        if self.chunk_size <= 0:
+            raise ValueError("chunk.chunk_size must be > 0")
+        if self.chunk_overlap < 0:
+            raise ValueError("chunk.chunk_overlap must be >= 0")
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk.chunk_overlap must be < chunk.chunk_size")
+        if not self.separators:
+            raise ValueError("chunk.separators must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
 class EmbedSettings:
-    """Embedding configuration.
-
-    The default embedder is deterministic and offline ("hash") so the pipeline
-    can run in CI without network credentials.
-
-    Providers:
-      - hash: local deterministic pseudo-embeddings (for tests/dev)
-      - openai: OpenAI embeddings via langchain-openai (requires OPENAI_API_KEY)
-      - hf: SentenceTransformers embeddings (requires sentence-transformers)
-    """
-
     provider: str = "hash"  # hash | openai | hf
-
-    # hash provider
     dim: int = 384
-
-    # openai provider
     model: str = "text-embedding-3-small"
-
-    # hf provider
     hf_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-
-    # batching + robustness
     batch_size: int = 32
     retries: int = 3
     retry_backoff_s: float = 1.0
-
-    # text hygiene (helps determinism / avoids hidden differences)
     normalize_text: bool = True
     max_chars: int | None = None
+
+    def validate(self) -> None:
+        if self.provider not in {"hash", "openai", "hf"}:
+            raise ValueError("embed.provider must be one of: hash, openai, hf")
+        if self.batch_size <= 0:
+            raise ValueError("embed.batch_size must be > 0")
+        if self.retries < 1:
+            raise ValueError("embed.retries must be >= 1")
+        if self.retry_backoff_s <= 0:
+            raise ValueError("embed.retry_backoff_s must be > 0")
+
+        if self.provider == "hash" and self.dim <= 0:
+            raise ValueError("embed.dim must be > 0 for provider='hash'")
+        if self.provider == "openai" and not self.model.strip():
+            raise ValueError("embed.model must be non-empty for provider='openai'")
+        if self.provider == "hf" and not self.hf_model.strip():
+            raise ValueError("embed.hf_model must be non-empty for provider='hf'")
+
+        if self.max_chars is not None and self.max_chars <= 0:
+            raise ValueError("embed.max_chars must be > 0 when set")
 
 
 @dataclass(frozen=True, slots=True)
 class IndexSettings:
-    # Backend plugin: "local" (JSONL), "faiss", "qdrant", "pgvector"
     backend: str = "local"
-    # Backend-specific configuration. Keep secrets in env vars rather than here.
     backend_config: dict[str, object] = field(default_factory=dict)
-
     top_k: int = 5
-    # If set, only these metadata keys are persisted into the index (reduces size).
-    metadata_whitelist: Optional[Sequence[str]] = None
-    # If True, also store embedding config into state file for query consistency.
+    metadata_whitelist: Sequence[str] | None = None
     write_state: bool = True
     state_filename: str = "index_state.json"
+
+    def validate(self) -> None:
+        if self.backend not in {"local", "faiss", "qdrant", "pgvector"}:
+            raise ValueError("index.backend must be one of: local, faiss, qdrant, pgvector")
+        if self.top_k <= 0:
+            raise ValueError("index.top_k must be > 0")
+        if self.write_state and not self.state_filename.strip():
+            raise ValueError("index.state_filename must be non-empty when write_state=True")
+
+        if self.metadata_whitelist is not None:
+            if any((not k) or (not str(k).strip()) for k in self.metadata_whitelist):
+                raise ValueError("index.metadata_whitelist must contain only non-empty strings")
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,29 +120,21 @@ class IndexingPipelineSettings:
         return self.out_dir / self.index.state_filename
 
     def validate(self) -> None:
-        # chunk
-        if self.chunk.chunk_size <= 0:
-            raise ValueError("chunk_size must be > 0")
-        if self.chunk.chunk_overlap < 0:
-            raise ValueError("chunk_overlap must be >= 0")
-        if self.chunk.chunk_overlap >= self.chunk.chunk_size:
-            raise ValueError("chunk_overlap must be < chunk_size")
+        # local / intrinsic checks
+        self.ingest.validate()
+        self.chunk.validate()
+        self.embed.validate()
+        self.index.validate()
 
-        # embed
-        if self.embed.batch_size <= 0:
-            raise ValueError("embed.batch_size must be > 0")
-        if self.embed.dim <= 0:
-            raise ValueError("embed.dim must be > 0")
-        if self.embed.provider not in {"hash", "openai", "hf"}:
-            raise ValueError("embed.provider must be one of: hash, openai, hf")
-        if self.embed.retries < 1:
-            raise ValueError("embed.retries must be >= 1")
-        if self.embed.retry_backoff_s <= 0:
-            raise ValueError("embed.retry_backoff_s must be > 0")
+        # context checks (belong here)
+        if not self.kb_dir.exists() or not self.kb_dir.is_dir():
+            raise ValueError(f"kb_dir must exist and be a directory: {self.kb_dir}")
+        
+        if self.out_dir.exists() and not self.out_dir.is_dir():
+            raise ValueError(f"out_dir must be a directory: {self.out_dir}")
 
-        # index
-        if self.index.top_k <= 0:
-            raise ValueError("index.top_k must be > 0")
 
-        if self.index.backend not in {"local", "faiss", "qdrant", "pgvector"}:
-            raise ValueError('index.backend must be one of: local, faiss, qdrant, pgvector')
+        # optional: filename sanity
+        for name in (self.docs_filename, self.chunks_filename, self.index_filename):
+            if not name.strip():
+                raise ValueError("output filenames must be non-empty")
