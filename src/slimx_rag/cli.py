@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.cmd == "ingest":
+    if args.cmd == "ingest":    
         settings = IndexingPipelineSettings(kb_dir=args.kb_dir, ingest=IngestSettings(glob=args.glob))
         settings.ingest.validate()
         docs = fetch_documents(settings=settings)
@@ -138,6 +138,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "chunk":
+        settings = IndexingPipelineSettings(chunk = ChunkSettings(
+            chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap))
+        settings.chunk.validate()
         docs = list(_read_jsonl_docs(args.in_path))
         chunks = chunk_documents(
             docs,
