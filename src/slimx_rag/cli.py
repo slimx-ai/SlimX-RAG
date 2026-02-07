@@ -2,125 +2,163 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Tuple
+from typing import Dict, List, Tuple
 
-from langchain_core.documents import Document
-
+from slimx_rag.utils.commons import _read_jsonl_docs, _write_jsonl
 from slimx_rag.ingest.loader import fetch_documents
 from slimx_rag.chunk import chunk_documents
 from slimx_rag.embed import embed_chunks, make_embedder
 from slimx_rag.index import make_index_backend
-from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexingPipelineSettings, IngestSettings, IndexSettings
+from slimx_rag.settings import (
+    ChunkSettings,
+    EmbedSettings,
+    IndexingPipelineSettings,
+    IngestSettings,
+    IndexSettings,
+)
+from slimx_rag.settings import EMBED_PROVIDERS, INDEX_BACKENDS
 
-
-def _write_jsonl(docs: Iterable[Document], out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as f:
-        for d in docs:
-            rec = {"page_content": d.page_content, "metadata": d.metadata}
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-
-def _read_jsonl_docs(in_path: Path) -> Iterator[Document]:
-    with in_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            yield Document(page_content=rec.get("page_content", "") or "", metadata=rec.get("metadata", {}) or {})
-
+logger = logging.getLogger(__name__)
 
 def _scan_chunks_for_state(in_path: Path) -> Dict[str, Tuple[str, List[str]]]:
-    """Return doc_id -> (content_hash, [chunk_ids]) from chunks.jsonl."""
+    """
+    Scan a `chunks.jsonl` file and build a doc-level "state view" used for incremental indexing.
+
+    Returns:
+        Mapping: doc_id -> (content_hash, [chunk_id, ...])
+
+    Semantics:
+    - Streams chunk records from `in_path` (JSONL).
+    - Extracts doc identity via metadata["doc_id"] (fallback: metadata["parent_doc_id"]).
+    - Extracts a doc version fingerprint via metadata["content_hash"] (may be empty).
+    - Collects all chunk_ids per doc_id in file order.
+    - Records missing doc_id/parent_doc_id OR chunk_id are skipped because they cannot be compared
+      deterministically during incremental cleanup. A single warning summary is logged.
+
+    Edge cases:
+    - Duplicate chunk_ids are preserved (no de-duplication).
+    - If inconsistent non-empty content_hash values occur for the same doc_id, "last non-empty wins".
+
+    TODO:
+    - Consider de-duplicating chunk_ids (set/tuple) to reduce memory and avoid duplicates.
+    - Consider stricter handling of inconsistent content_hash per doc_id (raise or warn deterministically).
+    - Consider capturing diagnostics for skipped records (e.g., sample entries/line numbers).
+    """
     out: Dict[str, Tuple[str, List[str]]] = {}
+
+    skipped = 0
+    missing_doc_id = 0
+    missing_chunk_id = 0
+
     for d in _read_jsonl_docs(in_path):
         md = d.metadata or {}
         doc_id = str(md.get("doc_id") or md.get("parent_doc_id") or "")
         content_hash = str(md.get("content_hash") or "")
         chunk_id = str(md.get("chunk_id") or "")
+
         if not doc_id or not chunk_id:
-            # skip chunks that cannot participate in incremental indexing
+            skipped += 1
+            if not doc_id:
+                missing_doc_id += 1
+            if not chunk_id:
+                missing_chunk_id += 1
             continue
+
         if doc_id not in out:
             out[doc_id] = (content_hash, [chunk_id])
         else:
             h, ids = out[doc_id]
-            # Prefer first seen hash, but if inconsistent, last wins (should not happen)
+            # Prefer first seen hash, but if inconsistent, last non-empty wins (should not happen)
             if content_hash and h != content_hash:
                 h = content_hash
             ids.append(chunk_id)
             out[doc_id] = (h, ids)
-    return out
 
+    if skipped:
+        logger.warning(
+            "Skipped %d chunk record(s) while scanning %s (missing doc_id/parent_doc_id: %d, missing chunk_id: %d).",
+            skipped,
+            in_path,
+            missing_doc_id,
+            missing_chunk_id,
+        )
+    return out
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="slimx-rag", description="SlimX-RAG CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    pipe_defaults = IndexingPipelineSettings()
+    ingest_defaults = IngestSettings()
+    chunk_defaults = ChunkSettings()
+    embed_defaults = EmbedSettings()
+    index_defaults = IndexSettings()
+
+
     # ingest
     pi = sub.add_parser("ingest", help="Load KB documents and write docs.jsonl")
-    pi.add_argument("--kb-dir", type=Path, default=IndexingPipelineSettings().kb_dir)
-    pi.add_argument("--glob", type=str, default=IngestSettings().glob)
-    pi.add_argument("--out", type=Path, default=IndexingPipelineSettings().docs_path)
+    pi.add_argument("--kb-dir", type=Path, default=pipe_defaults.kb_dir)
+    pi.add_argument("--glob", type=str, default=ingest_defaults.glob)
+    pi.add_argument("--out", type=Path, default=pipe_defaults.docs_path)
 
     # chunk
     pc = sub.add_parser("chunk", help="Chunk docs.jsonl into chunks.jsonl")
     pc.add_argument("--in", dest="in_path", type=Path, required=True)
-    pc.add_argument("--out", type=Path, default=IndexingPipelineSettings().chunks_path)
-    pc.add_argument("--chunk-size", type=int, default=ChunkSettings().chunk_size)
-    pc.add_argument("--chunk-overlap", type=int, default=ChunkSettings().chunk_overlap)
+    pc.add_argument("--out", type=Path, default=pipe_defaults.chunks_path)
+    pc.add_argument("--chunk-size", type=int, default=chunk_defaults.chunk_size)
+    pc.add_argument("--chunk-overlap", type=int, default=chunk_defaults.chunk_overlap)
 
     # index
     px = sub.add_parser("index", help="Embed chunks.jsonl and build/update a local index.jsonl")
     px.add_argument("--in", dest="in_path", type=Path, required=True)
-    px.add_argument("--index", type=Path, default=IndexingPipelineSettings().index_path)
+    px.add_argument("--index", type=Path, default=pipe_defaults.index_path)
     px.add_argument("--state", type=Path, default=None)
-    px.add_argument("--index-backend", type=str, default=IndexSettings().backend, choices=["local", "faiss", "qdrant", "pgvector"])
+    px.add_argument("--index-backend", type=str, default=IndexSettings().backend, choices=INDEX_BACKENDS)
     px.add_argument("--backend-config", type=str, default="", help="JSON string with backend-specific config (e.g., {\"collection\": \"slimx\"})")
     px.add_argument("--reindex", action="store_true", help="Re-embed and overwrite existing chunk_ids")
     px.add_argument("--top-k", type=int, default=IndexSettings().top_k)
     px.add_argument("--meta-keep", type=str, default="", help="Comma-separated metadata keys to keep (optional)")
 
     # embed options
-    px.add_argument("--embed-provider", type=str, default=EmbedSettings().provider, choices=["hash", "openai", "hf"])
-    px.add_argument("--embed-model", type=str, default=EmbedSettings().model, help="OpenAI embedding model")
-    px.add_argument("--hf-model", type=str, default=EmbedSettings().hf_model, help="SentenceTransformers model id")
-    px.add_argument("--embed-dim", type=int, default=EmbedSettings().dim, help="Hash dim (and optional validation)")
-    px.add_argument("--embed-batch", type=int, default=EmbedSettings().batch_size)
-    px.add_argument("--embed-max-chars", type=int, default=EmbedSettings().max_chars or 0, help="0 disables")
+    px.add_argument("--embed-provider", type=str, default=embed_defaults.provider, choices=EMBED_PROVIDERS)
+    px.add_argument("--embed-model", type=str, default=embed_defaults.model, help="OpenAI embedding model")
+    px.add_argument("--hf-model", type=str, default=embed_defaults.hf_model, help="SentenceTransformers model id")
+    px.add_argument("--embed-dim", type=int, default=embed_defaults.dim, help="Hash dim (and optional validation)")
+    px.add_argument("--embed-batch", type=int, default=embed_defaults.batch_size)
+    px.add_argument("--embed-max-chars", type=int, default=embed_defaults.max_chars or 0, help="0 disables")
     px.add_argument("--embed-no-normalize", action="store_true")
 
     # query
     pq = sub.add_parser("query", help="Search the local index.jsonl")
-    pq.add_argument("--index", type=Path, default=IndexingPipelineSettings().index_path)
+    pq.add_argument("--index", type=Path, default=pipe_defaults.index_path)
     pq.add_argument("--state", type=Path, default=None)
-    pq.add_argument("--index-backend", type=str, default=IndexSettings().backend, choices=["local", "faiss", "qdrant", "pgvector"])
+    pq.add_argument("--index-backend", type=str, default=IndexSettings().backend, choices=INDEX_BACKENDS)
     pq.add_argument("--backend-config", type=str, default="", help="JSON string with backend-specific config")
     pq.add_argument("--q", type=str, required=True)
     pq.add_argument("--k", type=int, default=IndexSettings().top_k)
 
     # run (ingest -> chunk -> index)
     pr = sub.add_parser("run", help="Run ingest -> chunk -> index")
-    pr.add_argument("--kb-dir", type=Path, default=IndexingPipelineSettings().kb_dir)
-    pr.add_argument("--glob", type=str, default=IngestSettings().glob)
-    pr.add_argument("--out-dir", type=Path, default=IndexingPipelineSettings().out_dir)
-    pr.add_argument("--chunk-size", type=int, default=ChunkSettings().chunk_size)
-    pr.add_argument("--chunk-overlap", type=int, default=ChunkSettings().chunk_overlap)
+    pr.add_argument("--kb-dir", type=Path, default=pipe_defaults.kb_dir)
+    pr.add_argument("--glob", type=str, default=ingest_defaults.glob)
+    pr.add_argument("--out-dir", type=Path, default=pipe_defaults.out_dir)
+    pr.add_argument("--chunk-size", type=int, default=chunk_defaults.chunk_size)
+    pr.add_argument("--chunk-overlap", type=int, default=chunk_defaults.chunk_overlap)
 
     # embed/index options for run
-    pr.add_argument("--embed-provider", type=str, default=EmbedSettings().provider, choices=["hash", "openai", "hf"])
-    pr.add_argument("--embed-model", type=str, default=EmbedSettings().model)
-    pr.add_argument("--hf-model", type=str, default=EmbedSettings().hf_model)
-    pr.add_argument("--embed-dim", type=int, default=EmbedSettings().dim)
-    pr.add_argument("--embed-batch", type=int, default=EmbedSettings().batch_size)
-    pr.add_argument("--embed-max-chars", type=int, default=EmbedSettings().max_chars or 0)
+    pr.add_argument("--embed-provider", type=str, default=embed_defaults.provider, choices=EMBED_PROVIDERS)
+    pr.add_argument("--embed-model", type=str, default=embed_defaults.model)
+    pr.add_argument("--hf-model", type=str, default=embed_defaults.hf_model)
+    pr.add_argument("--embed-dim", type=int, default=embed_defaults.dim)
+    pr.add_argument("--embed-batch", type=int, default=embed_defaults.batch_size)
+    pr.add_argument("--embed-max-chars", type=int, default=embed_defaults.max_chars or 0)
     pr.add_argument("--embed-no-normalize", action="store_true")
     pr.add_argument("--reindex", action="store_true")
     pr.add_argument("--meta-keep", type=str, default="")
-    pr.add_argument("--top-k", type=int, default=IndexSettings().top_k)
-    pr.add_argument("--index-backend", type=str, default=IndexSettings().backend, choices=["local", "faiss", "qdrant", "pgvector"])
+    pr.add_argument("--top-k", type=int, default=index_defaults.top_k)
+    pr.add_argument("--index-backend", type=str, default=index_defaults.backend, choices=INDEX_BACKENDS)
     pr.add_argument("--backend-config", type=str, default="", help="JSON string with backend-specific config")
 
     return p
@@ -128,6 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # CLI-friendly logging (can be replaced by richer config later)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
 
     if args.cmd == "ingest":    
         settings = IndexingPipelineSettings(kb_dir=args.kb_dir, ingest=IngestSettings(glob=args.glob))
@@ -152,14 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd in {"index", "run"}:
-        # build settings from flags
-        if args.cmd == "run":
-            settings = IndexingPipelineSettings(
-                kb_dir=args.kb_dir,
-                out_dir=args.out_dir,
-                ingest=IngestSettings(glob=args.glob),
-                chunk=ChunkSettings(chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap),
-                embed=EmbedSettings(
+        embed_settings = EmbedSettings(
                     provider=args.embed_provider,
                     model=args.embed_model,
                     hf_model=args.hf_model,
@@ -167,13 +202,23 @@ def main(argv: list[str] | None = None) -> int:
                     batch_size=args.embed_batch,
                     max_chars=(None if args.embed_max_chars == 0 else int(args.embed_max_chars)),
                     normalize_text=not args.embed_no_normalize,
-                ),
-                index=IndexSettings(
-                    backend=args.index_backend,
-                    backend_config=(json.loads(args.backend_config) if args.backend_config else {}),
-                    top_k=args.top_k,
-                    metadata_whitelist=[k.strip() for k in args.meta_keep.split(",") if k.strip()] or None,
-                ),
+                )
+        
+        index_settings = IndexSettings(
+                backend=args.index_backend,
+                backend_config=(json.loads(args.backend_config) if args.backend_config else {}),
+                top_k=args.top_k,
+                metadata_whitelist=[k.strip() for k in args.meta_keep.split(",") if k.strip()] or None,
+            )
+        # build settings from flags
+        if args.cmd == "run":
+            settings = IndexingPipelineSettings(
+                kb_dir=args.kb_dir,
+                out_dir=args.out_dir,
+                ingest=IngestSettings(glob=args.glob),
+                chunk=ChunkSettings(chunk_size=args.chunk_size, chunk_overlap=args.chunk_overlap),
+                embed=embed_settings,
+                index=index_settings
             )
             settings.validate()
 
@@ -191,28 +236,11 @@ def main(argv: list[str] | None = None) -> int:
             in_chunks = settings.chunks_path
             index_path = settings.index_path
             state_path = settings.index_state_path
-            embed_settings = settings.embed
-            index_settings = settings.index
             reindex = bool(args.reindex)
         else:
             index_path = args.index
             state_path = args.state
             in_chunks = args.in_path
-            embed_settings = EmbedSettings(
-                provider=args.embed_provider,
-                model=args.embed_model,
-                hf_model=args.hf_model,
-                dim=args.embed_dim,
-                batch_size=args.embed_batch,
-                max_chars=(None if args.embed_max_chars == 0 else int(args.embed_max_chars)),
-                normalize_text=not args.embed_no_normalize,
-            )
-            index_settings = IndexSettings(
-                backend=args.index_backend,
-                backend_config=(json.loads(args.backend_config) if args.backend_config else {}),
-                top_k=args.top_k,
-                metadata_whitelist=[k.strip() for k in args.meta_keep.split(",") if k.strip()] or None,
-            )
             reindex = bool(args.reindex)
 
         idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)
