@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -9,6 +8,7 @@ from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_core.documents import Document
 
 from slimx_rag.settings import IndexingPipelineSettings
+from slimx_rag.utils.commons import _content_hash, _hash_path, _hash_text
 
 logger = logging.getLogger(__name__)
 
@@ -23,22 +23,6 @@ def iter_subdirs(kb_dir: Path) -> Iterable[Path]:
     for p in kb_dir.iterdir():
         if p.is_dir():
             yield p
-
-
-def _hash_text(text: str, *, digest_size: int) -> str:
-    h = hashlib.blake2b(digest_size=digest_size)
-    h.update(text.encode("utf-8"))
-    return h.hexdigest()
-
-
-def _hash_path(kb_relpath: str) -> str:
-    # doc identity: stable across edits as long as path stays stable
-    return _hash_text(kb_relpath, digest_size=32)
-
-
-def _content_hash(text: str) -> str:
-    # doc version fingerprint: changes when content changes (supports incremental indexing later)
-    return _hash_text(text or "", digest_size=16)
 
 
 def _doc_type_from_relpath(relpath: Path, depth: int) -> str:

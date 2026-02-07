@@ -6,6 +6,7 @@ from typing import Iterable, List, Sequence, Tuple
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from slimx_rag.utils.commons import _hash_text
 
 def _stable_doc_sort_key(doc: Document) -> Tuple[str, str]:
     """
@@ -24,12 +25,6 @@ def _stable_doc_sort_key(doc: Document) -> Tuple[str, str]:
     )
     doc_type = str(doc.metadata.get("doc_type", ""))
     return (src, doc_type)
-
-
-def _hash_text(text: str, *, digest_size: int = 16) -> str:
-    h = hashlib.blake2b(digest_size=digest_size)
-    h.update(text.encode("utf-8", errors="ignore"))
-    return h.hexdigest()
 
 
 def _chunk_config_fingerprint(
