@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import time
-import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Optional, Sequence
+from typing import Iterable, Iterator, List, Optional
 
 from langchain_core.documents import Document
 
 from slimx_rag.settings import EmbedSettings
+from slimx_rag.utils.commons import _normalize_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,20 +103,6 @@ def make_embedder(settings: EmbedSettings) -> Embedder:
     if settings.provider == "hf":
         return HuggingFaceEmbedder(model=settings.hf_model)
     raise ValueError(f"Unknown embed provider: {settings.provider}")
-
-
-def _normalize_text(text: str, *, max_chars: Optional[int], normalize: bool) -> str:
-    t = text or ""
-    if normalize:
-        # NFC helps stabilize unicode forms
-        t = unicodedata.normalize("NFC", t)
-        # normalize newlines
-        t = t.replace("\r\n", "\n").replace("\r", "\n")
-        # strip trailing whitespace (keeps semantics mostly intact)
-        t = "\n".join(line.rstrip() for line in t.split("\n"))
-    if max_chars is not None and max_chars > 0 and len(t) > max_chars:
-        t = t[:max_chars]
-    return t
 
 
 def _validate_vectors(
