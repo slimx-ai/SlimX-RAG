@@ -50,6 +50,7 @@ source .venv/bin/activate
 Then run:
 
 ```bash
+# requires uv sync --extra dev
 pytest
 # or
 pytest -q
