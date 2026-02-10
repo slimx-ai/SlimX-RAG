@@ -170,5 +170,5 @@ class LocalJsonlIndexBackend(IndexBackend):
         return results
 
 
-# Backwards-compatible alias (older code imports LocalJsonlIndex)
-LocalJsonlIndex = LocalJsonlIndexBackend
+# # Backwards-compatible alias (older code imports LocalJsonlIndex)
+# LocalJsonlIndex = LocalJsonlIndexBackend
