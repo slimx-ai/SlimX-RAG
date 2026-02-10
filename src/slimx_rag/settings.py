@@ -4,6 +4,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence 
 
+# settings.py (top-level)
+EMBED_PROVIDERS: tuple[str, ...] = ("hash", "openai", "hf")
+EXTERNAL_EMBED_PROVIDERS: tuple[str, ...] = tuple(p for p in EMBED_PROVIDERS if p != "hash")
+INDEX_BACKENDS: tuple[str, ...] = ("local", "faiss", "qdrant", "pgvector")
+
+
 @dataclass(frozen=True, slots=True)
 class IngestSettings:
     glob: str = "**/*.md"
@@ -46,8 +52,8 @@ class EmbedSettings:
     max_chars: int | None = None
 
     def validate(self) -> None:
-        if self.provider not in {"hash", "openai", "hf"}:
-            raise ValueError("embed.provider must be one of: hash, openai, hf")
+        if self.provider not in set(EMBED_PROVIDERS):
+            raise ValueError(f"embed.provider must be one of: {', '.join(EMBED_PROVIDERS)}")
         if self.batch_size <= 0:
             raise ValueError("embed.batch_size must be > 0")
         if self.retries < 1:
@@ -58,9 +64,7 @@ class EmbedSettings:
         if self.provider == "hash" and self.dim <= 0:
             raise ValueError("embed.dim must be > 0 for provider='hash'")
         if self.provider == "openai" and not self.model.strip():
-            raise ValueError("embed.model must be non-empty for provider='openai'")
-        if self.provider == "hf" and not self.hf_model.strip():
-            raise ValueError("embed.hf_model must be non-empty for provider='hf'")
+            raise ValueError(f"embed.model must be non-empty for provider={EXTERNAL_EMBED_PROVIDERS}")
 
         if self.max_chars is not None and self.max_chars <= 0:
             raise ValueError("embed.max_chars must be > 0 when set")
@@ -76,8 +80,8 @@ class IndexSettings:
     state_filename: str = "index_state.json"
 
     def validate(self) -> None:
-        if self.backend not in {"local", "faiss", "qdrant", "pgvector"}:
-            raise ValueError("index.backend must be one of: local, faiss, qdrant, pgvector")
+        if self.backend not in set(INDEX_BACKENDS):
+            raise ValueError(f"index.backend must be one of: {', '.join(INDEX_BACKENDS)}")
         if self.top_k <= 0:
             raise ValueError("index.top_k must be > 0")
         if self.write_state and not self.state_filename.strip():
