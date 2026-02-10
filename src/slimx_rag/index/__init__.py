@@ -7,7 +7,7 @@ from slimx_rag.settings import IndexSettings
 
 from .base import IndexBackend
 from .types import SearchResult, IndexState
-from .local import LocalJsonlIndexBackend, LocalJsonlIndex
+from .local import LocalJsonlIndexBackend
 
 
 def make_index_backend(
@@ -25,7 +25,7 @@ def make_index_backend(
       - pgvector (Postgres)
     """
     st = settings or IndexSettings()
-    backend = (st.backend or "local").lower().strip()
+    backend = (st.backend or IndexSettings.backend).lower().strip()
 
     if backend == "local":
         return LocalJsonlIndexBackend(index_path, settings=st, state_path=state_path)
