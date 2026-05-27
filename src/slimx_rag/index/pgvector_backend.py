@@ -159,20 +159,23 @@ class PgVectorIndexBackend(IndexBackend):
             raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {dim}")
 
         k = int(top_k or self.settings.top_k)
+        candidate_k = max(k, k * 4)
         qlit = _vector_literal(list(map(float, query_vector)))
 
         # pgvector cosine distance: (embedding <=> query)  (smaller is better)
-        # Convert to a similarity-like score: score = 1 - distance
+        # Convert to a similarity-like score: score = 1 - distance.
+        # SQL includes chunk_id as a deterministic secondary tie-breaker; Python
+        # post-sorting keeps the same contract across all backends.
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
                     SELECT chunk_id, text, metadata, 1 - (embedding <=> %s::vector) AS score
                     FROM {self._fqtn}
-                    ORDER BY embedding <=> %s::vector
+                    ORDER BY embedding <=> %s::vector, chunk_id ASC
                     LIMIT %s;
                     """,
-                    (qlit, qlit, k),
+                    (qlit, qlit, candidate_k),
                 )
                 rows = cur.fetchall() or []
 
@@ -186,4 +189,4 @@ class PgVectorIndexBackend(IndexBackend):
                     metadata=dict(metadata or {}),
                 )
             )
-        return out
+        return self._sort_results(out, top_k=k)
