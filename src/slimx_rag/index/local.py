@@ -168,7 +168,3 @@ class LocalJsonlIndexBackend(IndexBackend):
             _vec, _vn, text, md = self._items[cid]
             results.append(SearchResult(chunk_id=cid, score=float(score), text=text, metadata=md))
         return results
-
-
-# # Backwards-compatible alias (older code imports LocalJsonlIndex)
-# LocalJsonlIndex = LocalJsonlIndexBackend
