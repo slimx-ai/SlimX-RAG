@@ -67,10 +67,10 @@ class FaissIndexBackend(IndexBackend):
             except Exception:
                 pass
         else:
-            # create empty if possible
-            dim = self._dim or int((self.state.embed or {}).get("dim") or 0) or int(self.settings.backend_config.get("dim", 0) or 0)
+            # create empty only if backend_config['dim'] explicitly constrains storage
+            dim = int(self.settings.backend_config.get("dim", 0) or 0)
             if dim <= 0:
-                # Defer creation until first upsert/set_embed_config
+                # Defer creation until first upsert vector
                 self._index = None
                 return
             self._ensure_index(dim)
@@ -180,7 +180,7 @@ class FaissIndexBackend(IndexBackend):
 
             self._chunk_to_id[cid] = faiss_id
             self._id_to_chunk[faiss_id] = cid
-            self._payload[cid] = (it.text, dict(it.metadata))
+            self._payload[cid] = (it.text, self._apply_metadata_whitelist(dict(it.metadata)))
             written += 1
 
         return written
