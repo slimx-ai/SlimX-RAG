@@ -6,7 +6,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import IndexSettings
@@ -110,13 +110,6 @@ class LocalJsonlIndexBackend(IndexBackend):
                 pass
 
         self._save_state_if_enabled()
-
-    def _apply_metadata_whitelist(self, md: dict[str, object]) -> dict[str, object]:
-        wl = self.settings.metadata_whitelist
-        if not wl:
-            return md
-        keep = set(wl)
-        return {k: v for k, v in md.items() if k in keep}
 
     def delete(self, chunk_ids: Iterable[str]) -> int:
         deleted = 0
