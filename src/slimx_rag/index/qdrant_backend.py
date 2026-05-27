@@ -126,9 +126,10 @@ class QdrantIndexBackend(IndexBackend):
         if self._dim is not None and len(query_vector) != int(self._dim):
             raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {self._dim}")
         k = int(top_k or self.settings.top_k)
-        res = self.client.search(collection_name=self.collection, query_vector=list(map(float, query_vector)), limit=k, with_payload=True)
+        candidate_k = max(k, k * 4)
+        res = self.client.search(collection_name=self.collection, query_vector=list(map(float, query_vector)), limit=candidate_k, with_payload=True)
         out: List[SearchResult] = []
         for p in res:
             payload = p.payload or {}
             out.append(SearchResult(chunk_id=str(p.id), score=float(p.score), text=str(payload.get("text") or ""), metadata=dict(payload.get("metadata") or {})))
-        return out
+        return self._sort_results(out, top_k=k)
