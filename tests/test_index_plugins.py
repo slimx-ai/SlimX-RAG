@@ -41,6 +41,26 @@ def test_local_backend_infers_external_provider_dimension_from_vectors(tmp_path)
     assert idx.query([1.0, 0.0, 0.0], top_k=1)[0].chunk_id == "c1"
 
 
+def test_local_backend_infers_hash_provider_dimension_from_vectors(tmp_path):
+    idx_path = tmp_path / "index.jsonl"
+    st_path = tmp_path / "index_state.json"
+
+    idx = make_index_backend(idx_path, settings=IndexSettings(backend="local"), state_path=st_path)
+    idx.load()
+
+    # Even for hash, EmbedSettings.dim is provider configuration. The index
+    # backend dimension is inferred from the actual vector that is stored.
+    idx.set_embed_config(EmbedSettings(provider="hash", dim=2))
+    assert idx.dim is None
+
+    written = idx.upsert([
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={}),
+    ])
+
+    assert written == 1
+    assert idx.dim == 2
+
+
 def test_index_backend_local_roundtrip_and_query(tmp_path):
     idx_path = tmp_path / "index.jsonl"
     st_path = tmp_path / "index_state.json"
@@ -56,6 +76,7 @@ def test_index_backend_local_roundtrip_and_query(tmp_path):
     idx = make_index_backend(idx_path, settings=settings, state_path=st_path)
     idx.load()
     idx.set_embed_config(EmbedSettings(provider="hash", dim=2))
+    assert idx.dim is None
 
     # Initialize incremental state for two docs
     current_docs = {
@@ -73,6 +94,7 @@ def test_index_backend_local_roundtrip_and_query(tmp_path):
         skip_existing=True,
     )
     assert written == 2
+    assert idx.dim == 2
     idx.save()
 
     # Reload and query
