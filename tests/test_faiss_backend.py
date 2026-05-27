@@ -80,3 +80,22 @@ def test_faiss_first_upsert_creates_index_after_embed_config(monkeypatch, tmp_pa
     assert idx.dim == 2
     assert len(idx) == 1
     assert idx.query([1.0, 0.0], top_k=1)[0].chunk_id == "c1"
+
+
+def test_faiss_applies_metadata_whitelist(monkeypatch, tmp_path):
+    install_fake_faiss(monkeypatch)
+
+    from slimx_rag.index.faiss_backend import FaissIndexBackend
+
+    idx = FaissIndexBackend(
+        tmp_path / "index.faiss",
+        settings=IndexSettings(backend="faiss", metadata_whitelist=["keep"]),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    idx.upsert([
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={"keep": 1, "drop": 2}),
+    ])
+
+    assert idx.query([1.0, 0.0], top_k=1)[0].metadata == {"keep": 1}
