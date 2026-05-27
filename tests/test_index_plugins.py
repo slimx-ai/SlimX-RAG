@@ -14,6 +14,30 @@ def test_index_public_exports_are_importable():
     assert callable(namespace["make_index_backend"])
 
 
+def test_local_backend_infers_external_provider_dimension_from_vectors(tmp_path):
+    idx_path = tmp_path / "index.jsonl"
+    st_path = tmp_path / "index_state.json"
+
+    idx = make_index_backend(idx_path, settings=IndexSettings(backend="local"), state_path=st_path)
+    idx.load()
+
+    # Non-hash providers may return model-defined dimensions. The backend must
+    # not force EmbedSettings.dim=384 before seeing the first actual vector.
+    idx.set_embed_config(EmbedSettings(provider="hf", dim=384))
+    assert idx.dim is None
+
+    written = idx.upsert(
+        [
+            EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0, 0.0], text="A", metadata={}),
+            EmbeddedChunk(chunk_id="c2", vector=[0.0, 1.0, 0.0], text="B", metadata={}),
+        ]
+    )
+
+    assert written == 2
+    assert idx.dim == 3
+    assert idx.query([1.0, 0.0, 0.0], top_k=1)[0].chunk_id == "c1"
+
+
 def test_index_backend_local_roundtrip_and_query(tmp_path):
     idx_path = tmp_path / "index.jsonl"
     st_path = tmp_path / "index_state.json"
