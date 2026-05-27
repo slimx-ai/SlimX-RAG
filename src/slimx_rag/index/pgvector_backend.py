@@ -24,6 +24,7 @@ class PgVectorIndexBackend(IndexBackend):
       - table: str (default 'slimx_vectors')
       - create_table: bool (default True)
       - schema: str (default 'public')
+      - dim: int (optional explicit storage constraint)
     """
 
     def __init__(self, index_path: Path, *, settings: Optional[IndexSettings] = None, state_path: Optional[Path] = None):
@@ -54,30 +55,39 @@ class PgVectorIndexBackend(IndexBackend):
     def _fqtn(self) -> str:
         return f"{self.schema}.{self.table}"
 
-    def load(self) -> None:
-        dim = self._dim or int((self.state.embed or {}).get("dim") or 0) or int(self.settings.backend_config.get("dim", 0) or 0)
-        if dim <= 0 and self.create_table:
-            # Defer until set_embed_config / first upsert
+    def _configured_dim(self) -> int:
+        return int((self.settings.backend_config or {}).get("dim", 0) or 0)
+
+    def _ensure_table(self, dim: int) -> None:
+        if dim <= 0:
+            raise ValueError("pgvector table dimension must be > 0")
+
+        self._dim = dim
+        if not self.create_table:
             return
-        if dim > 0:
-            self._dim = dim
 
         with self._connect() as conn:
             with conn.cursor() as cur:
-                # Ensure extension
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-                if self.create_table and self._dim:
-                    cur.execute(
-                        f"""
-                        CREATE TABLE IF NOT EXISTS {self._fqtn} (
-                            chunk_id TEXT PRIMARY KEY,
-                            embedding vector({int(self._dim)}),
-                            text TEXT,
-                            metadata JSONB
-                        );
-                        """
-                    )
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {self._fqtn} (
+                        chunk_id TEXT PRIMARY KEY,
+                        embedding vector({int(dim)}),
+                        text TEXT,
+                        metadata JSONB
+                    );
+                    """
+                )
             conn.commit()
+
+    def load(self) -> None:
+        # Only backend_config['dim'] is an explicit storage constraint. Do not use
+        # state.embed['dim'] here because it is provider configuration, not proof
+        # of the actual stored vector dimension.
+        cfg_dim = self._configured_dim()
+        if cfg_dim > 0:
+            self._ensure_table(cfg_dim)
 
         self.state = IndexState.load(self.state_path)
 
@@ -97,16 +107,21 @@ class PgVectorIndexBackend(IndexBackend):
         return int(deleted)
 
     def upsert(self, items: Iterable[EmbeddedChunk], *, skip_existing: bool = True) -> int:
-        dim = self._dim or int((self.state.embed or {}).get("dim") or 0) or int(self.settings.backend_config.get("dim", 0) or 0)
-        if dim <= 0:
-            raise ValueError("pgvector backend needs a known embedding dim. Call set_embed_config() or set backend_config['dim'].")
-        self._dim = dim
-
+        cfg_dim = self._configured_dim()
         rows = []
+
         for it in items:
-            if len(it.vector) != dim:
-                raise RuntimeError(f"Vector dim mismatch: expected {dim}, got {len(it.vector)}")
-            rows.append((str(it.chunk_id), _vector_literal(list(map(float, it.vector))), it.text, dict(it.metadata)))
+            vector = list(map(float, it.vector))
+            actual_dim = len(vector)
+            expected_dim = self._dim or cfg_dim or actual_dim
+
+            if self._dim is None:
+                self._ensure_table(expected_dim)
+
+            if actual_dim != int(self._dim or expected_dim):
+                raise RuntimeError(f"Vector dim mismatch: expected {self._dim or expected_dim}, got {actual_dim}")
+
+            rows.append((str(it.chunk_id), _vector_literal(vector), it.text, dict(it.metadata)))
 
         if not rows:
             return 0
@@ -137,7 +152,7 @@ class PgVectorIndexBackend(IndexBackend):
         return len(rows)
 
     def query(self, query_vector: List[float], *, top_k: Optional[int] = None) -> List[SearchResult]:
-        dim = self._dim or int((self.state.embed or {}).get("dim") or 0) or int(self.settings.backend_config.get("dim", 0) or 0)
+        dim = self._dim or self._configured_dim()
         if dim <= 0:
             return []
         if len(query_vector) != dim:
