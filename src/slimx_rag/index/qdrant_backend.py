@@ -8,6 +8,7 @@ from slimx_rag.settings import IndexSettings
 from .base import IndexBackend
 from .types import SearchResult, IndexState
 
+
 class QdrantIndexBackend(IndexBackend):
     """Qdrant backend plugin (optional dependency).
 
@@ -17,6 +18,7 @@ class QdrantIndexBackend(IndexBackend):
       - url: str (default http://localhost:6333)
       - api_key: str
       - prefer_grpc: bool
+      - dim: int (optional explicit storage constraint)
     """
 
     def __init__(self, index_path: Path, *, settings: Optional[IndexSettings] = None, state_path: Optional[Path] = None):
@@ -43,26 +45,54 @@ class QdrantIndexBackend(IndexBackend):
 
         self.state = IndexState.load(self.state_path)
 
-    def load(self) -> None:
-        # Ensure collection exists with correct vector size
-        dim = self._dim or int((self.state.embed or {}).get("dim") or 0) or int(self.settings.backend_config.get("dim", 0) or 0)
+    def _configured_dim(self) -> int:
+        return int((self.settings.backend_config or {}).get("dim", 0) or 0)
+
+    @staticmethod
+    def _collection_dim(info: object) -> Optional[int]:
+        try:
+            return int(info.config.params.vectors.size)  # type: ignore[attr-defined]
+        except Exception:
+            return None
+
+    def _ensure_collection(self, dim: int) -> None:
         if dim <= 0:
-            # Defer until set_embed_config / first upsert
-            return
-        self._dim = dim
+            raise ValueError("Qdrant collection dimension must be > 0")
 
         if not self.client.collection_exists(self.collection):
             self.client.create_collection(
                 collection_name=self.collection,
                 vectors_config=self._qm.VectorParams(size=dim, distance=self._qm.Distance.COSINE),
             )
-        else:
+            self._dim = dim
+            return
+
+        info = self.client.get_collection(self.collection)
+        existing_dim = self._collection_dim(info)
+        if existing_dim is not None:
+            if existing_dim != dim:
+                raise RuntimeError(f"Qdrant collection dim {existing_dim} does not match expected dim {dim}")
+            self._dim = existing_dim
+        elif self._dim is None:
+            # Fall back to the requested dimension when Qdrant's response shape is not recognized.
+            self._dim = dim
+
+    def load(self) -> None:
+        # Existing collections define the real backend dimension. If the collection
+        # does not exist yet, create it only when backend_config['dim'] explicitly
+        # constrains storage; otherwise defer until first upsert vector.
+        if self.client.collection_exists(self.collection):
             info = self.client.get_collection(self.collection)
-            try:
-                size = int(info.config.params.vectors.size)  # type: ignore
-                self._dim = size
-            except Exception:
-                pass
+            existing_dim = self._collection_dim(info)
+            if existing_dim is not None:
+                cfg_dim = self._configured_dim()
+                if cfg_dim > 0 and cfg_dim != existing_dim:
+                    raise RuntimeError(f"Qdrant collection dim {existing_dim} does not match configured dim {cfg_dim}")
+                self._dim = existing_dim
+        else:
+            cfg_dim = self._configured_dim()
+            if cfg_dim > 0:
+                self._ensure_collection(cfg_dim)
 
         self.state = IndexState.load(self.state_path)
 
@@ -89,16 +119,21 @@ class QdrantIndexBackend(IndexBackend):
 
         written = 0
         points = []
-        dim = self._dim or int((self.state.embed or {}).get("dim") or 0) or int(self.settings.backend_config.get("dim", 0) or 0)
-        if dim <= 0:
-            raise ValueError("Qdrant backend needs a known embedding dim. Call set_embed_config() or set backend_config['dim'].")
-        self._dim = dim
+        cfg_dim = self._configured_dim()
 
         for it in items:
-            if len(it.vector) != dim:
-                raise RuntimeError(f"Vector dim mismatch: expected {dim}, got {len(it.vector)}")
+            vector = list(map(float, it.vector))
+            actual_dim = len(vector)
+            expected_dim = self._dim or cfg_dim or actual_dim
+
+            if self._dim is None:
+                self._ensure_collection(expected_dim)
+
+            if actual_dim != int(self._dim or expected_dim):
+                raise RuntimeError(f"Vector dim mismatch: expected {self._dim or expected_dim}, got {actual_dim}")
+
             payload = {"text": it.text, "metadata": dict(it.metadata)}
-            points.append(self._qm.PointStruct(id=str(it.chunk_id), vector=list(map(float, it.vector)), payload=payload))
+            points.append(self._qm.PointStruct(id=str(it.chunk_id), vector=vector, payload=payload))
             written += 1
 
         if points:
@@ -106,6 +141,9 @@ class QdrantIndexBackend(IndexBackend):
         return written
 
     def query(self, query_vector: List[float], *, top_k: Optional[int] = None) -> List[SearchResult]:
+        if self._dim is not None and len(query_vector) != int(self._dim):
+            raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {self._dim}")
+
         k = int(top_k or self.settings.top_k)
         res = self.client.search(
             collection_name=self.collection,
