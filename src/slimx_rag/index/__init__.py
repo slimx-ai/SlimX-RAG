@@ -9,6 +9,9 @@ from .base import IndexBackend
 from .types import SearchResult, IndexState
 from .local import LocalJsonlIndexBackend
 
+# Backwards-compatible alias for older library users.
+LocalJsonlIndex = LocalJsonlIndexBackend
+
 
 def make_index_backend(
     index_path: Path,
@@ -24,7 +27,7 @@ def make_index_backend(
       - qdrant (remote)
       - pgvector (Postgres)
     """
-    # TODO: using registery pattern would be cleaner, but this is straightforward enough for now
+    # TODO: using registry pattern would be cleaner, but this is straightforward enough for now
     st = settings or IndexSettings()
     backend = (st.backend or IndexSettings.backend).lower().strip()
 
