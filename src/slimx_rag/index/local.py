@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import heapq
 import json
 import math
 import os
@@ -142,22 +141,11 @@ class LocalJsonlIndexBackend(IndexBackend):
         if self._dim is not None and len(query_vector) != self._dim:
             raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {self._dim}")
 
-        k = top_k or self.settings.top_k
+        k = int(top_k or self.settings.top_k)
         qn = _norm(query_vector)
-
-        # Use heap for top-k without sorting all (better for mid-size)
-        heap: List[Tuple[float, str]] = []
-        for cid, (vec, vn, _text, _md) in self._items.items():
-            score = _cosine(query_vector, qn, vec, vn)
-            if len(heap) < k:
-                heapq.heappush(heap, (score, cid))
-            else:
-                if score > heap[0][0]:
-                    heapq.heapreplace(heap, (score, cid))
-
-        heap.sort(reverse=True, key=lambda t: t[0])
         results: List[SearchResult] = []
-        for score, cid in heap:
-            _vec, _vn, text, md = self._items[cid]
+        for cid, (vec, vn, text, md) in self._items.items():
+            score = _cosine(query_vector, qn, vec, vn)
             results.append(SearchResult(chunk_id=cid, score=float(score), text=text, metadata=md))
-        return results
+
+        return self._sort_results(results, top_k=k)
