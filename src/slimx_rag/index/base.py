@@ -79,6 +79,14 @@ class IndexBackend(ABC):
             "max_chars": embed.max_chars,
         }
 
+    def _apply_metadata_whitelist(self, md: dict[str, object]) -> dict[str, object]:
+        """Apply the shared metadata whitelist contract for all backends."""
+        wl = self.settings.metadata_whitelist
+        if not wl:
+            return dict(md)
+        keep = {str(k) for k in wl}
+        return {k: v for k, v in dict(md).items() if k in keep}
+
     def _save_state_if_enabled(self) -> None:
         if self.settings.write_state:
             self.state.save(self.state_path)
