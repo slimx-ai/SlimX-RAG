@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from slimx_rag.index import make_index_backend
+from slimx_rag.index import LocalJsonlIndex, LocalJsonlIndexBackend, make_index_backend
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import EmbedSettings, IndexSettings
+
+
+def test_index_public_exports_are_importable():
+    namespace: dict[str, object] = {}
+    exec("from slimx_rag.index import *", namespace)
+
+    assert namespace["LocalJsonlIndex"] is LocalJsonlIndexBackend
+    assert LocalJsonlIndex is LocalJsonlIndexBackend
+    assert callable(namespace["make_index_backend"])
 
 
 def test_index_backend_local_roundtrip_and_query(tmp_path):
