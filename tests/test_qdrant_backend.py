@@ -81,7 +81,8 @@ class FakeQdrantClient:
         for p in store.values():
             score = sum(a * b for a, b in zip(query_vector, p.vector))
             out.append(types.SimpleNamespace(id=p.id, score=score, payload=p.payload))
-        out.sort(key=lambda p: p.score, reverse=True)
+        # Intentionally reverse tie order to prove backend code applies chunk_id ascending.
+        out.sort(key=lambda p: (p.score, p.id), reverse=True)
         return out[:limit]
 
 
@@ -176,6 +177,27 @@ def test_qdrant_applies_metadata_whitelist(monkeypatch, tmp_path):
     ])
 
     assert idx.query([1.0, 0.0], top_k=1)[0].metadata == {"keep": 1}
+
+
+def test_qdrant_query_orders_equal_scores_by_chunk_id(monkeypatch, tmp_path):
+    install_fake_qdrant(monkeypatch)
+
+    from slimx_rag.index.qdrant_backend import QdrantIndexBackend
+
+    idx = QdrantIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="qdrant", backend_config={"collection": "slimx"}, top_k=3),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    idx.upsert([
+        EmbeddedChunk(chunk_id="c3", vector=[1.0, 0.0], text="C", metadata={}),
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={}),
+        EmbeddedChunk(chunk_id="c2", vector=[1.0, 0.0], text="B", metadata={}),
+    ])
+
+    assert [r.chunk_id for r in idx.query([1.0, 0.0], top_k=3)] == ["c1", "c2", "c3"]
 
 
 def test_qdrant_skip_existing_does_not_overwrite_existing_points(monkeypatch, tmp_path):
