@@ -87,6 +87,12 @@ class IndexBackend(ABC):
         keep = {str(k) for k in wl}
         return {k: v for k, v in dict(md).items() if k in keep}
 
+    @staticmethod
+    def _sort_results(results: Iterable[SearchResult], *, top_k: Optional[int] = None) -> List[SearchResult]:
+        """Deterministically order results by score descending, then chunk_id ascending."""
+        ordered = sorted(results, key=lambda r: (-float(r.score), str(r.chunk_id)))
+        return ordered[:top_k] if top_k is not None else ordered
+
     def _save_state_if_enabled(self) -> None:
         if self.settings.write_state:
             self.state.save(self.state_path)
