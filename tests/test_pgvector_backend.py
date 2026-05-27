@@ -91,6 +91,10 @@ def all_sql() -> str:
     return "\n".join(sql for conn in FakePsycopg.connections for sql, _params in conn.executed)
 
 
+def latest_connection() -> FakeConnection:
+    return FakePsycopg.connections[-1]
+
+
 def test_pgvector_first_upsert_creates_table_from_vector_dim(monkeypatch, tmp_path):
     install_fake_psycopg(monkeypatch)
 
@@ -141,3 +145,26 @@ def test_pgvector_configured_dim_is_enforced_on_first_upsert(monkeypatch, tmp_pa
         assert False, "expected dimension mismatch"
     except RuntimeError as e:
         assert "Vector dim mismatch" in str(e)
+
+
+def test_pgvector_applies_metadata_whitelist(monkeypatch, tmp_path):
+    install_fake_psycopg(monkeypatch)
+
+    from slimx_rag.index.pgvector_backend import PgVectorIndexBackend
+
+    idx = PgVectorIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(
+            backend="pgvector",
+            backend_config={"dsn": "postgresql://test/db"},
+            metadata_whitelist=["keep"],
+        ),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    idx.upsert([
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={"keep": 1, "drop": 2}),
+    ])
+
+    assert latest_connection().rows["c1"]["metadata"] == {"keep": 1}
