@@ -61,6 +61,23 @@ def test_local_backend_infers_hash_provider_dimension_from_vectors(tmp_path):
     assert idx.dim == 2
 
 
+def test_local_query_orders_equal_scores_by_chunk_id(tmp_path):
+    idx = make_index_backend(
+        tmp_path / "index.jsonl",
+        settings=IndexSettings(backend="local", top_k=3),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    idx.upsert([
+        EmbeddedChunk(chunk_id="c3", vector=[1.0, 0.0], text="C", metadata={}),
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={}),
+        EmbeddedChunk(chunk_id="c2", vector=[1.0, 0.0], text="B", metadata={}),
+    ])
+
+    assert [r.chunk_id for r in idx.query([1.0, 0.0], top_k=3)] == ["c1", "c2", "c3"]
+
+
 def test_index_backend_local_roundtrip_and_query(tmp_path):
     idx_path = tmp_path / "index.jsonl"
     st_path = tmp_path / "index_state.json"
