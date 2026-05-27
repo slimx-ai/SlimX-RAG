@@ -60,6 +60,17 @@ class QdrantIndexBackend(IndexBackend):
         elif self._dim is None:
             self._dim = dim
 
+    def _existing_ids(self, ids: list[str]) -> set[str]:
+        if not ids or not self.client.collection_exists(self.collection):
+            return set()
+        points = self.client.retrieve(
+            collection_name=self.collection,
+            ids=ids,
+            with_payload=False,
+            with_vectors=False,
+        )
+        return {str(p.id) for p in points or []}
+
     def load(self) -> None:
         if self.client.collection_exists(self.collection):
             info = self.client.get_collection(self.collection)
@@ -86,12 +97,17 @@ class QdrantIndexBackend(IndexBackend):
         return len(ids)
 
     def upsert(self, items: Iterable[EmbeddedChunk], *, skip_existing: bool = True) -> int:
-        if skip_existing:
-            pass
+        item_list = list(items)
+        existing = self._existing_ids([str(it.chunk_id) for it in item_list]) if skip_existing else set()
+
         written = 0
         points = []
         cfg_dim = self._configured_dim()
-        for it in items:
+        for it in item_list:
+            cid = str(it.chunk_id)
+            if cid in existing:
+                continue
+
             vector = list(map(float, it.vector))
             actual_dim = len(vector)
             expected_dim = self._dim or cfg_dim or actual_dim
@@ -100,7 +116,7 @@ class QdrantIndexBackend(IndexBackend):
             if actual_dim != int(self._dim or expected_dim):
                 raise RuntimeError(f"Vector dim mismatch: expected {self._dim or expected_dim}, got {actual_dim}")
             payload = {"text": it.text, "metadata": self._apply_metadata_whitelist(dict(it.metadata))}
-            points.append(self._qm.PointStruct(id=str(it.chunk_id), vector=vector, payload=payload))
+            points.append(self._qm.PointStruct(id=cid, vector=vector, payload=payload))
             written += 1
         if points:
             self.client.upsert(collection_name=self.collection, points=points)
