@@ -70,12 +70,13 @@ def test_faiss_first_upsert_creates_index_after_embed_config(monkeypatch, tmp_pa
     assert len(idx) == 0
 
     idx.set_embed_config(EmbedSettings(provider="hash", dim=2))
-    assert idx.dim == 2
+    assert idx.dim is None
 
     written = idx.upsert([
         EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={}),
     ])
 
     assert written == 1
+    assert idx.dim == 2
     assert len(idx) == 1
     assert idx.query([1.0, 0.0], top_k=1)[0].chunk_id == "c1"
