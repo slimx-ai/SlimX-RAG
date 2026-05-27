@@ -60,6 +60,13 @@ class IndexBackend(ABC):
         """Return top-k most similar chunks."""
 
     def set_embed_config(self, embed: EmbedSettings) -> None:
+        """Persist embedding configuration used to produce vectors.
+
+        This intentionally does not set backend dimension. The backend dimension
+        is the actual stored vector dimension and should be inferred from vectors
+        or explicitly constrained by backend_config['dim'] where a backend needs
+        to create remote storage before upsert.
+        """
         self.state.embed = {
             "provider": embed.provider,
             "model": embed.model,
@@ -71,12 +78,6 @@ class IndexBackend(ABC):
             "normalize_text": embed.normalize_text,
             "max_chars": embed.max_chars,
         }
-        # The hash provider's dimension is controlled by EmbedSettings.dim.
-        # External providers may return model-defined dimensions, so the backend
-        # should infer/validate dimension from the first stored vector unless an
-        # explicit backend_config['dim'] is supplied by that backend.
-        if self._dim is None and embed.provider == "hash":
-            self._dim = int(embed.dim)
 
     def _save_state_if_enabled(self) -> None:
         if self.settings.write_state:
