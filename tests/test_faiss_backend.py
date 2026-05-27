@@ -35,7 +35,9 @@ class FakeIndexIDMap2:
         scored = []
         for fid, vec in self.rows.items():
             scored.append((float(np.dot(q[0], vec)), fid))
-        scored.sort(reverse=True)
+        # Intentionally sort ties by ID descending to prove backend code
+        # re-sorts final SearchResult objects by chunk_id ascending.
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
         scored = scored[:k]
         while len(scored) < k:
             scored.append((0.0, -1))
@@ -99,3 +101,24 @@ def test_faiss_applies_metadata_whitelist(monkeypatch, tmp_path):
     ])
 
     assert idx.query([1.0, 0.0], top_k=1)[0].metadata == {"keep": 1}
+
+
+def test_faiss_query_orders_equal_scores_by_chunk_id(monkeypatch, tmp_path):
+    install_fake_faiss(monkeypatch)
+
+    from slimx_rag.index.faiss_backend import FaissIndexBackend
+
+    idx = FaissIndexBackend(
+        tmp_path / "index.faiss",
+        settings=IndexSettings(backend="faiss", top_k=3),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    idx.upsert([
+        EmbeddedChunk(chunk_id="c3", vector=[1.0, 0.0], text="C", metadata={}),
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={}),
+        EmbeddedChunk(chunk_id="c2", vector=[1.0, 0.0], text="B", metadata={}),
+    ])
+
+    assert [r.chunk_id for r in idx.query([1.0, 0.0], top_k=3)] == ["c1", "c2", "c3"]
