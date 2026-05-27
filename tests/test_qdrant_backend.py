@@ -147,3 +147,26 @@ def test_qdrant_configured_dim_is_enforced_on_first_upsert(monkeypatch, tmp_path
         assert False, "expected dimension mismatch"
     except RuntimeError as e:
         assert "Vector dim mismatch" in str(e)
+
+
+def test_qdrant_applies_metadata_whitelist(monkeypatch, tmp_path):
+    install_fake_qdrant(monkeypatch)
+
+    from slimx_rag.index.qdrant_backend import QdrantIndexBackend
+
+    idx = QdrantIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(
+            backend="qdrant",
+            backend_config={"collection": "slimx"},
+            metadata_whitelist=["keep"],
+        ),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    idx.upsert([
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={"keep": 1, "drop": 2}),
+    ])
+
+    assert idx.query([1.0, 0.0], top_k=1)[0].metadata == {"keep": 1}
