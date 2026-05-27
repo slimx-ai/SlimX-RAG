@@ -65,9 +65,17 @@ class IndexBackend(ABC):
             "model": embed.model,
             "hf_model": embed.hf_model,
             "dim": embed.dim,
+            "batch_size": embed.batch_size,
+            "retries": embed.retries,
+            "retry_backoff_s": embed.retry_backoff_s,
+            "normalize_text": embed.normalize_text,
+            "max_chars": embed.max_chars,
         }
-        # Keep local dim consistent if backend doesn't infer it elsewhere.
-        if self._dim is None:
+        # The hash provider's dimension is controlled by EmbedSettings.dim.
+        # External providers may return model-defined dimensions, so the backend
+        # should infer/validate dimension from the first stored vector unless an
+        # explicit backend_config['dim'] is supplied by that backend.
+        if self._dim is None and embed.provider == "hash":
             self._dim = int(embed.dim)
 
     def _save_state_if_enabled(self) -> None:
