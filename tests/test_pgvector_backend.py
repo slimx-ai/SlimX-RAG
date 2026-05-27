@@ -30,9 +30,11 @@ class FakeCursor:
                     deleted += 1
             self.rowcount = deleted
         elif "SELECT chunk_id" in sql:
+            # Intentionally return reverse chunk_id order for equal scores to
+            # prove PgVectorIndexBackend post-sorts deterministically.
             self._rows = [
                 (cid, row["text"], row["metadata"], 1.0)
-                for cid, row in self.conn.rows.items()
+                for cid, row in sorted(self.conn.rows.items(), key=lambda kv: kv[0], reverse=True)
             ]
 
     def executemany(self, sql: str, rows):
@@ -168,3 +170,25 @@ def test_pgvector_applies_metadata_whitelist(monkeypatch, tmp_path):
     ])
 
     assert latest_connection().rows["c1"]["metadata"] == {"keep": 1}
+
+
+def test_pgvector_query_orders_equal_scores_by_chunk_id(monkeypatch, tmp_path):
+    install_fake_psycopg(monkeypatch)
+
+    from slimx_rag.index.pgvector_backend import PgVectorIndexBackend
+
+    idx = PgVectorIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="pgvector", backend_config={"dsn": "postgresql://test/db"}, top_k=3),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    idx.upsert([
+        EmbeddedChunk(chunk_id="c3", vector=[1.0, 0.0], text="C", metadata={}),
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={}),
+        EmbeddedChunk(chunk_id="c2", vector=[1.0, 0.0], text="B", metadata={}),
+    ])
+
+    assert [r.chunk_id for r in idx.query([1.0, 0.0], top_k=3)] == ["c1", "c2", "c3"]
+    assert "ORDER BY embedding <=> %s::vector, chunk_id ASC" in all_sql()
