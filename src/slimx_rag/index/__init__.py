@@ -7,10 +7,6 @@ from slimx_rag.settings import IndexSettings
 
 from .base import IndexBackend
 from .types import SearchResult, IndexState
-from .local import LocalJsonlIndexBackend
-
-# Backwards-compatible alias for older library users.
-LocalJsonlIndex = LocalJsonlIndexBackend
 
 
 def make_index_backend(
@@ -32,6 +28,7 @@ def make_index_backend(
     backend = (st.backend or IndexSettings.backend).lower().strip()
 
     if backend == "local":
+        from .local import LocalJsonlIndexBackend
         return LocalJsonlIndexBackend(index_path, settings=st, state_path=state_path)
 
     if backend == "faiss":
@@ -54,7 +51,4 @@ __all__ = [
     "make_index_backend",
     "SearchResult",
     "IndexState",
-    # Local backend
-    "LocalJsonlIndexBackend",
-    "LocalJsonlIndex",
 ]
