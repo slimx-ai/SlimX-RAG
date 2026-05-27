@@ -38,6 +38,7 @@ class FakeQdrantClient:
         self.prefer_grpc = prefer_grpc
         self.collections: dict[str, int] = {}
         self.points: dict[str, dict[str, FakePointStruct]] = {}
+        self.retrieve_calls: list[list[str]] = []
         FakeQdrantClient.instances.append(self)
 
     def collection_exists(self, collection_name: str) -> bool:
@@ -56,6 +57,11 @@ class FakeQdrantClient:
                 )
             )
         )
+
+    def retrieve(self, *, collection_name: str, ids: list[str], with_payload: bool, with_vectors: bool):
+        self.retrieve_calls.append(list(ids))
+        store = self.points.get(collection_name, {})
+        return [types.SimpleNamespace(id=pid) for pid in ids if str(pid) in store]
 
     def upsert(self, *, collection_name: str, points: list[FakePointStruct]):
         if collection_name not in self.collections:
@@ -170,3 +176,58 @@ def test_qdrant_applies_metadata_whitelist(monkeypatch, tmp_path):
     ])
 
     assert idx.query([1.0, 0.0], top_k=1)[0].metadata == {"keep": 1}
+
+
+def test_qdrant_skip_existing_does_not_overwrite_existing_points(monkeypatch, tmp_path):
+    install_fake_qdrant(monkeypatch)
+
+    from slimx_rag.index.qdrant_backend import QdrantIndexBackend
+
+    idx = QdrantIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="qdrant", backend_config={"collection": "slimx"}),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    assert idx.upsert([
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="old", metadata={"version": "old"}),
+    ]) == 1
+
+    client = FakeQdrantClient.instances[-1]
+    assert client.points["slimx"]["c1"].payload["text"] == "old"
+
+    written = idx.upsert([
+        EmbeddedChunk(chunk_id="c1", vector=[0.0, 1.0], text="new", metadata={"version": "new"}),
+        EmbeddedChunk(chunk_id="c2", vector=[0.0, 1.0], text="second", metadata={"version": "second"}),
+    ], skip_existing=True)
+
+    assert written == 1
+    assert client.retrieve_calls[-1] == ["c1", "c2"]
+    assert client.points["slimx"]["c1"].payload["text"] == "old"
+    assert client.points["slimx"]["c2"].payload["text"] == "second"
+
+
+def test_qdrant_skip_existing_false_overwrites_existing_points(monkeypatch, tmp_path):
+    install_fake_qdrant(monkeypatch)
+
+    from slimx_rag.index.qdrant_backend import QdrantIndexBackend
+
+    idx = QdrantIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="qdrant", backend_config={"collection": "slimx"}),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    idx.upsert([
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="old", metadata={}),
+    ])
+
+    written = idx.upsert([
+        EmbeddedChunk(chunk_id="c1", vector=[0.0, 1.0], text="new", metadata={}),
+    ], skip_existing=False)
+
+    client = FakeQdrantClient.instances[-1]
+    assert written == 1
+    assert client.points["slimx"]["c1"].payload["text"] == "new"
