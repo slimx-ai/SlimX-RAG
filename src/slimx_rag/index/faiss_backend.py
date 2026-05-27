@@ -73,9 +73,7 @@ class FaissIndexBackend(IndexBackend):
                 # Defer creation until first upsert/set_embed_config
                 self._index = None
                 return
-            self._dim = dim
-            base = self._faiss.IndexFlatIP(dim)
-            self._index = self._faiss.IndexIDMap2(base)
+            self._ensure_index(dim)
 
         # Load sidecar metadata
         self._chunk_to_id.clear()
@@ -113,6 +111,8 @@ class FaissIndexBackend(IndexBackend):
         self._save_state_if_enabled()
 
     def _ensure_index(self, dim: int) -> None:
+        if dim <= 0:
+            raise ValueError("FAISS index dimension must be > 0")
         if self._index is not None:
             return
         base = self._faiss.IndexFlatIP(dim)
@@ -154,10 +154,13 @@ class FaissIndexBackend(IndexBackend):
             if vec.ndim != 1:
                 raise ValueError("vector must be 1D")
 
+            dim = int(vec.shape[0])
             if self._dim is None:
-                self._ensure_index(int(vec.shape[0]))
-            elif int(vec.shape[0]) != int(self._dim):
-                raise RuntimeError(f"Vector dim mismatch: index dim {self._dim} vs item dim {int(vec.shape[0])}")
+                self._ensure_index(dim)
+            elif dim != int(self._dim):
+                raise RuntimeError(f"Vector dim mismatch: index dim {self._dim} vs item dim {dim}")
+            elif self._index is None:
+                self._ensure_index(dim)
 
             assert self._index is not None
             vec_n = _l2_normalize(vec).reshape(1, -1)
