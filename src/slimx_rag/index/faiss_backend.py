@@ -195,7 +195,11 @@ class FaissIndexBackend(IndexBackend):
         k = int(top_k or self.settings.top_k)
         q = _l2_normalize(np.array(query_vector, dtype="float32")).reshape(1, -1)
 
-        scores, ids = self._index.search(q, k)
+        # Fetch a slightly wider candidate set so deterministic tie-breaking by
+        # chunk_id can still be applied when FAISS returns equal-score ties in an
+        # arbitrary order.
+        candidate_k = max(k, min(len(self._payload), k * 4))
+        scores, ids = self._index.search(q, candidate_k)
         results: List[SearchResult] = []
 
         for score, fid in zip(scores[0].tolist(), ids[0].tolist()):
@@ -206,4 +210,4 @@ class FaissIndexBackend(IndexBackend):
                 continue
             text, md = self._payload.get(cid, ("", {}))
             results.append(SearchResult(chunk_id=cid, score=float(score), text=text, metadata=md))
-        return results
+        return self._sort_results(results, top_k=k)
