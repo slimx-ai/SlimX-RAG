@@ -121,7 +121,7 @@ class PgVectorIndexBackend(IndexBackend):
             if actual_dim != int(self._dim or expected_dim):
                 raise RuntimeError(f"Vector dim mismatch: expected {self._dim or expected_dim}, got {actual_dim}")
 
-            rows.append((str(it.chunk_id), _vector_literal(vector), it.text, dict(it.metadata)))
+            rows.append((str(it.chunk_id), _vector_literal(vector), it.text, self._apply_metadata_whitelist(dict(it.metadata))))
 
         if not rows:
             return 0
