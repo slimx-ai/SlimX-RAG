@@ -49,6 +49,11 @@ def _state_path() -> Path:
     return Path(os.getenv("RAG_STATE_PATH", "output/index_state.json"))
 
 
+def _llm_timeout() -> float | None:
+    raw = os.getenv("SLIMX_LLM_TIMEOUT", "")
+    return float(raw) if raw else None
+
+
 def _check_token(authorization: str | None) -> None:
     token = os.getenv("DEMO_AUTH_TOKEN")
     if not token:
@@ -130,6 +135,7 @@ def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(de
         payload.question,
         retrieval,
         model=payload.model or os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
+        timeout=_llm_timeout(),
     )
     return result.to_dict()
 
@@ -146,6 +152,7 @@ def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(defau
         index_settings=_index_settings(),
         model=payload.model or os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
         top_k=payload.top_k or _index_settings().top_k,
+        timeout=_llm_timeout(),
     )
     return {"markdown": report.to_markdown(), "cases": report.cases}
 

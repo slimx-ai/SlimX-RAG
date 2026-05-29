@@ -13,6 +13,12 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+def default_timeout_for_model(model: str) -> Optional[float]:
+    if model.startswith("ollama:"):
+        return 180.0
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class AnswerResult:
     question: str
@@ -51,6 +57,7 @@ def answer(
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     temperature: Optional[float] = 0.1,
     max_tokens: Optional[int] = 700,
+    timeout: Optional[float] = None,
 ) -> AnswerResult:
     warnings: list[str] = []
     citations = [chunk.citation for chunk in retrieval.chunks]
@@ -70,7 +77,7 @@ def answer(
                 f"Based on the retrieved corpus, the strongest evidence is in {first.citation}. "
                 f"{first.text[:280].strip()}"
             )
-        model_trace = {"provider": "fake", "model": model, "elapsed_ms": 0}
+        model_trace = {"provider": "fake", "model": model, "elapsed_ms": 0, "timeout": timeout}
     else:
         try:
             from slimx import llm
@@ -78,7 +85,8 @@ def answer(
             raise RuntimeError("SlimX answer generation requires the 'slimx' package.") from e
 
         prompt = build_grounded_prompt(question, retrieval, system_prompt=system_prompt)
-        response = llm(model, temperature=temperature, max_tokens=max_tokens)(prompt)
+        effective_timeout = timeout if timeout is not None else default_timeout_for_model(model)
+        response = llm(model, temperature=temperature, max_tokens=max_tokens, timeout=effective_timeout)(prompt)
         text = response.text
         model_trace = dict(getattr(response, "trace", {}) or {})
 
