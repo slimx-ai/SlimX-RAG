@@ -4,7 +4,7 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
-from slimx_rag.answer import answer, build_grounded_prompt
+from slimx_rag.answer import answer, build_grounded_prompt, default_timeout_for_model
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.index import make_index_backend
 from slimx_rag.retrieve import retrieve
@@ -78,3 +78,8 @@ def test_grounded_prompt_contains_context_and_instruction():
     assert "Answer only from the retrieved context" in prompt
     assert "[a.md:0]" in prompt
     assert "Alpha" in prompt
+
+
+def test_ollama_uses_longer_default_timeout():
+    assert default_timeout_for_model("ollama:llama3.1") == 180.0
+    assert default_timeout_for_model("openai:gpt-4.1-mini") is None

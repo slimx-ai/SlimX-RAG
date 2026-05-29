@@ -66,6 +66,7 @@ def run_eval(
     model: str,
     state_path: Path | None = None,
     top_k: int = 5,
+    timeout: float | None = None,
 ) -> EvalReport:
     rows = []
     hits = cited = insufficient_pass = insufficient_total = 0
@@ -78,7 +79,7 @@ def run_eval(
             state_path=state_path,
             top_k=top_k,
         )
-        result = answer(case.question, retrieval, model=model)
+        result = answer(case.question, retrieval, model=model, timeout=timeout)
         retrieved_sources = [
             str(chunk.metadata.get("parent_kb_relpath") or chunk.metadata.get("kb_relpath") or "")
             for chunk in retrieval.chunks
