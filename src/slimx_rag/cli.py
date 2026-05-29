@@ -3,15 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from dataclasses import fields
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from slimx_rag.utils.commons import _read_jsonl_docs, _write_jsonl
+from slimx_rag.utils.commons import _read_jsonl_docs, _write_embeddings_jsonl, _write_jsonl
 from slimx_rag.ingest.loader import fetch_documents
 from slimx_rag.chunk import chunk_documents
 from slimx_rag.embed import embed_chunks, make_embedder
 from slimx_rag.index import make_index_backend
+from slimx_rag.answer import answer
+from slimx_rag.eval import load_eval_cases, run_eval, write_eval_report
+from slimx_rag.retrieve import retrieve
 from slimx_rag.settings import (
     ChunkSettings,
     EmbedSettings,
@@ -67,6 +70,10 @@ def _resolve_state_path(
     if not index_settings.write_state:
         return None
     return index_path.parent / index_settings.state_filename
+
+
+def _backend_uses_local_index_file(index_settings: IndexSettings) -> bool:
+    return index_settings.backend in {"local", "faiss"}
 
 
 # =============================================================================
@@ -136,6 +143,7 @@ def _index_chunks_file(
     index_path: Path,
     state_path: Optional[Path],
     reindex: bool,
+    embeddings_out_path: Optional[Path] = None,
 ) -> Tuple[int, int, int]:
     """
     Embed + upsert chunks, with incremental cleanup.
@@ -154,6 +162,10 @@ def _index_chunks_file(
 
     chunks_iter = _read_jsonl_docs(in_chunks_path)
     items = embed_chunks(chunks_iter, settings=embed_settings)
+    if embeddings_out_path is not None:
+        materialized = list(items)
+        _write_embeddings_jsonl(materialized, embeddings_out_path)
+        items = iter(materialized)
     written = idx.upsert(items, skip_existing=not reindex)
     idx.save()
 
@@ -292,6 +304,7 @@ def handle_index(args: argparse.Namespace) -> int:
     if state_path:
         _ensure_parent_dir(state_path)
 
+    embeddings_out_path = None if args.no_embeddings_out else args.out_dir / DEFAULTS.embeddings_filename
     deleted, written, total = _index_chunks_file(
         in_chunks_path=args.in_path,
         embed_settings=embed_settings,
@@ -299,6 +312,7 @@ def handle_index(args: argparse.Namespace) -> int:
         index_path=index_path,
         state_path=state_path,
         reindex=bool(args.reindex),
+        embeddings_out_path=embeddings_out_path,
     )
 
     logger.info("Index: %s", index_path)
@@ -355,6 +369,7 @@ def handle_run(args: argparse.Namespace) -> int:
     index_path = _resolve_index_path(args.index, settings.out_dir)
     state_path = _resolve_state_path(args_state=args.state, index_path=index_path, index_settings=index_settings)
 
+    embeddings_out_path = None if args.no_embeddings_out else settings.embeddings_path
     deleted, written, total = _index_chunks_file(
         in_chunks_path=settings.chunks_path,
         embed_settings=embed_settings,
@@ -362,6 +377,7 @@ def handle_run(args: argparse.Namespace) -> int:
         index_path=index_path,
         state_path=state_path,
         reindex=bool(args.reindex),
+        embeddings_out_path=embeddings_out_path,
     )
 
     logger.info("Index: %s", index_path)
@@ -383,7 +399,7 @@ def handle_query(args: argparse.Namespace) -> int:
     index_path = _resolve_index_path(args.index, args.out_dir)
     state_path = _resolve_state_path(args_state=args.state, index_path=index_path, index_settings=index_settings)
 
-    if not index_path.exists():
+    if _backend_uses_local_index_file(index_settings) and not index_path.exists():
         raise FileNotFoundError(f"Index not found at {index_path}")
 
     idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)
@@ -415,6 +431,114 @@ def handle_query(args: argparse.Namespace) -> int:
                 ensure_ascii=False,
             )
         )
+    return 0
+
+
+def _make_embed_settings_for_query(args: argparse.Namespace, idx_state_embed: Optional[dict[str, Any]]) -> EmbedSettings:
+    return _embed_settings_from_state_with_overrides(
+        saved_cfg=idx_state_embed or {},
+        provider=args.embed_provider,
+        model=args.embed_model,
+        hf_model=args.hf_model,
+        dim=args.embed_dim,
+        batch_size=args.embed_batch,
+        max_chars=args.embed_max_chars,
+        normalize_text=args.embed_normalize,
+    )
+
+
+def _load_embed_state(index_path: Path, index_settings: IndexSettings, state_path: Optional[Path]) -> dict[str, Any]:
+    idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)
+    idx.load()
+    return dict(getattr(idx.state, "embed", None) or {})
+
+
+def handle_retrieve(args: argparse.Namespace) -> int:
+    index_settings = IndexSettings(
+        backend=args.index_backend,
+        backend_config=_parse_backend_config(args.backend_config),
+        top_k=args.top_k,
+        metadata_whitelist=_parse_meta_keep(args.meta_keep),
+    )
+    index_settings.validate()
+    index_path = _resolve_index_path(args.index, args.out_dir)
+    state_path = _resolve_state_path(args_state=args.state, index_path=index_path, index_settings=index_settings)
+    if _backend_uses_local_index_file(index_settings) and not index_path.exists():
+        raise FileNotFoundError(f"Index not found at {index_path}")
+
+    embed_settings = _make_embed_settings_for_query(args, _load_embed_state(index_path, index_settings, state_path))
+    result = retrieve(
+        args.q,
+        index_path=index_path,
+        embed_settings=embed_settings,
+        index_settings=index_settings,
+        state_path=state_path,
+        top_k=args.k,
+    )
+    for chunk in result.chunks:
+        print(json.dumps(asdict(chunk), ensure_ascii=False))
+    return 0
+
+
+def handle_ask(args: argparse.Namespace) -> int:
+    index_settings = IndexSettings(
+        backend=args.index_backend,
+        backend_config=_parse_backend_config(args.backend_config),
+        top_k=args.top_k,
+        metadata_whitelist=_parse_meta_keep(args.meta_keep),
+    )
+    index_settings.validate()
+    index_path = _resolve_index_path(args.index, args.out_dir)
+    state_path = _resolve_state_path(args_state=args.state, index_path=index_path, index_settings=index_settings)
+    if _backend_uses_local_index_file(index_settings) and not index_path.exists():
+        raise FileNotFoundError(f"Index not found at {index_path}")
+
+    embed_settings = _make_embed_settings_for_query(args, _load_embed_state(index_path, index_settings, state_path))
+    retrieval = retrieve(
+        args.q,
+        index_path=index_path,
+        embed_settings=embed_settings,
+        index_settings=index_settings,
+        state_path=state_path,
+        top_k=args.k,
+    )
+    result = answer(args.q, retrieval, model=args.model)
+    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def handle_eval(args: argparse.Namespace) -> int:
+    index_settings = IndexSettings(
+        backend=args.index_backend,
+        backend_config=_parse_backend_config(args.backend_config),
+        top_k=args.top_k,
+        metadata_whitelist=_parse_meta_keep(args.meta_keep),
+    )
+    index_settings.validate()
+    index_path = _resolve_index_path(args.index, args.out_dir)
+    state_path = _resolve_state_path(args_state=args.state, index_path=index_path, index_settings=index_settings)
+    embed_settings = _make_embed_settings_for_query(args, _load_embed_state(index_path, index_settings, state_path))
+    cases = load_eval_cases(args.dataset)
+    report = run_eval(
+        cases,
+        index_path=index_path,
+        embed_settings=embed_settings,
+        index_settings=index_settings,
+        model=args.model,
+        state_path=state_path,
+        top_k=args.k,
+    )
+    write_eval_report(report, args.out)
+    logger.info("Wrote %s", args.out)
+    return 0
+
+
+def handle_serve(args: argparse.Namespace) -> int:
+    try:
+        import uvicorn
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("`slimx-rag serve` requires the demo extra: uv sync --extra demo") from e
+    uvicorn.run("slimx_rag.server:app", host=args.host, port=args.port, reload=args.reload)
     return 0
 
 
@@ -471,6 +595,7 @@ def _add_index_settings_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--top-k", type=int, default=d.top_k, help="Default k used by the backend/settings")
     g.add_argument("--meta-keep", type=str, default="", help="Comma-separated metadata keys to keep")
     g.add_argument("--reindex", action="store_true", help="Overwrite/recompute existing chunk_ids")
+    g.add_argument("--no-embeddings-out", action="store_true", help="Do not write embeddings.jsonl")
 
 
 def _add_index_files_args(p: argparse.ArgumentParser) -> None:
@@ -521,6 +646,37 @@ def build_parser() -> argparse.ArgumentParser:
     # query-specific embed overrides (state-first)
     _add_embed_overrides_query(pq)
     pq.set_defaults(func=handle_query)
+
+    # retrieve
+    prt = sub.add_parser("retrieve", parents=[p_out, p_idx], help="Retrieve ranked chunks from an index")
+    prt.add_argument("--q", type=str, required=True, help="Query text")
+    prt.add_argument("--k", type=int, default=DEFAULTS.index.top_k, help="Top-k results")
+    _add_embed_overrides_query(prt)
+    prt.set_defaults(func=handle_retrieve)
+
+    # ask
+    pa = sub.add_parser("ask", parents=[p_out, p_idx], help="Retrieve + generate a cited answer")
+    pa.add_argument("--q", type=str, required=True, help="Question")
+    pa.add_argument("--k", type=int, default=DEFAULTS.index.top_k, help="Top-k results")
+    pa.add_argument("--model", type=str, default="fake:grounded", help="SlimX model id, e.g. openai:gpt-4.1-mini")
+    _add_embed_overrides_query(pa)
+    pa.set_defaults(func=handle_ask)
+
+    # eval
+    pe = sub.add_parser("eval", parents=[p_out, p_idx], help="Run a demo evaluation dataset")
+    pe.add_argument("--dataset", type=Path, required=True, help="JSONL evaluation cases")
+    pe.add_argument("--out", type=Path, default=Path("output/eval_report.md"), help="Markdown or JSON report path")
+    pe.add_argument("--k", type=int, default=DEFAULTS.index.top_k, help="Top-k results")
+    pe.add_argument("--model", type=str, default="fake:grounded")
+    _add_embed_overrides_query(pe)
+    pe.set_defaults(func=handle_eval)
+
+    # serve
+    ps = sub.add_parser("serve", help="Start the customer demo API/UI")
+    ps.add_argument("--host", default="0.0.0.0")
+    ps.add_argument("--port", type=int, default=8080)
+    ps.add_argument("--reload", action="store_true")
+    ps.set_defaults(func=handle_serve)
 
     # run
     pr = sub.add_parser("run", parents=[p_out, p_ing, p_chk, p_emb, p_idx], help="ingest -> chunk -> index")

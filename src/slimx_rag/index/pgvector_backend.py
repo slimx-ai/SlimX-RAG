@@ -147,9 +147,10 @@ class PgVectorIndexBackend(IndexBackend):
                         """,
                         rows,
                     )
+                written = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(rows)
             conn.commit()
 
-        return len(rows)
+        return int(written)
 
     def query(self, query_vector: List[float], *, top_k: Optional[int] = None) -> List[SearchResult]:
         dim = self._dim or self._configured_dim()

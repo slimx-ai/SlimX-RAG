@@ -39,6 +39,19 @@ def test_fetch_documents_adds_doc_type_and_baseline_metadata(tmp_path: Path) -> 
     assert all(isinstance(x, str) and len(x) == 64 for x in doc_ids)
 
 
+def test_fetch_documents_includes_root_level_files(tmp_path: Path) -> None:
+    kb_dir = tmp_path / "knowledge-base"
+    write(kb_dir / "root.md", "# Root\nTop-level research note.")
+    write(kb_dir / "papers" / "paper.md", "# Paper\nNested research note.")
+
+    documents = fetch_documents(settings=IndexingPipelineSettings(kb_dir=kb_dir))
+
+    relpaths = sorted(d.metadata.get("kb_relpath") for d in documents)
+    assert relpaths == ["papers/paper.md", "root.md"]
+    root = next(d for d in documents if d.metadata["kb_relpath"] == "root.md")
+    assert root.metadata["doc_type"] == "root.md"
+
+
 def test_fetch_documents_baseline_metadata_exists(tmp_path: Path) -> None:
     kb_dir = tmp_path / "knowledge-base"
     write(kb_dir / "company" / "about.md", "# About\nThis is the about page.")

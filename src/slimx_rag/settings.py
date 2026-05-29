@@ -15,10 +15,16 @@ class IngestSettings:
     glob: str = "**/*.md"
     multithreading: bool = False
     show_progress: bool = False
+    doc_type_mode: str = "subdir"
+    doc_type_depth: int = 1
 
     def validate(self) -> None:
         if not self.glob or not self.glob.strip():
             raise ValueError("ingest.glob must be a non-empty glob pattern")
+        if self.doc_type_mode not in {"subdir", "none"}:
+            raise ValueError("ingest.doc_type_mode must be 'subdir' or 'none'")
+        if self.doc_type_depth <= 0:
+            raise ValueError("ingest.doc_type_depth must be > 0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +106,7 @@ class IndexingPipelineSettings:
 
     docs_filename: str = "docs.jsonl"
     chunks_filename: str = "chunks.jsonl"
+    embeddings_filename: str = "embeddings.jsonl"
     index_filename: str = "index.jsonl"
 
     ingest: IngestSettings = field(default_factory=IngestSettings)
@@ -114,6 +121,10 @@ class IndexingPipelineSettings:
     @property
     def chunks_path(self) -> Path:
         return self.out_dir / self.chunks_filename
+
+    @property
+    def embeddings_path(self) -> Path:
+        return self.out_dir / self.embeddings_filename
 
     @property
     def index_path(self) -> Path:

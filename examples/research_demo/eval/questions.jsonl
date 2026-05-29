@@ -1,0 +1,5 @@
+{"question":"What is SlimX.ai's strongest business wedge for research organizations?","expected_sources":["company/slimx-ai.md"]}
+{"question":"Which evidence supports SlimX.ai's edge/robotics credibility?","expected_sources":["robotics/edge-robotics.md"]}
+{"question":"Compare SlimX Core and SlimX-RAG.","expected_sources":["software/slimx-core.md","software/slimx-rag.md"]}
+{"question":"What are the limitations of the current BabyGPT/Model Lab direction?","expected_sources":["model-lab/babygpt.md"]}
+{"question":"What information is missing from the corpus about pricing?","expected_sources":[],"should_have_answer":false}
