@@ -1,0 +1,33 @@
+services:
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  app:
+    image: slimx-rag-demo:latest
+    env_file:
+      - .env
+    volumes:
+      - slimx_rag_data:/data
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  slimx_rag_data:
+  qdrant_data:

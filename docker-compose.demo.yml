@@ -1,0 +1,35 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      RAG_INDEX_BACKEND: ${RAG_INDEX_BACKEND:-local}
+      RAG_INDEX_PATH: ${RAG_INDEX_PATH:-/data/index.jsonl}
+      RAG_STATE_PATH: ${RAG_STATE_PATH:-/data/index_state.json}
+    volumes:
+      - ./output:/data
+      - ./examples:/app/examples:ro
+    depends_on:
+      - qdrant
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  qdrant_data:
+  ollama_data:

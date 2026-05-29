@@ -139,7 +139,7 @@ Guidelines:
 
 #### faiss
 
-- `dim` (int): required when creating a new FAISS index
+- `dim` (int): optional; inferred from the first vector when omitted
 - Optional:
   - `path` (str): path to `.faiss` file (defaults to `<index_path>.faiss` in the backend)
   - `metric` (str): `cosine` (default) or `l2`

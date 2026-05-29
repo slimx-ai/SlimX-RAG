@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SlimX-RAG Research Demo</title>
+    <style>
+      body { font-family: Inter, system-ui, sans-serif; margin: 0; background: #0b1020; color: #eef2ff; }
+      main { max-width: 1120px; margin: 0 auto; padding: 36px 20px; }
+      .hero, .panel { background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); border-radius: 18px; padding: 24px; margin-bottom: 18px; }
+      h1 { margin: 0 0 8px; font-size: 34px; }
+      textarea { width: 100%; min-height: 94px; border-radius: 14px; padding: 14px; border: 1px solid #334155; background: #111827; color: #fff; font-size: 15px; }
+      button { border: 0; border-radius: 12px; padding: 12px 16px; background: #38bdf8; color: #03101d; font-weight: 700; cursor: pointer; margin-right: 8px; }
+      pre { white-space: pre-wrap; background: #020617; border-radius: 14px; padding: 14px; overflow: auto; }
+      .chunks { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+      .chunk { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 14px; }
+      .meta { color: #93c5fd; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <h1>SlimX-RAG Research Assistant</h1>
+        <p>Grounded answers with explicit retrieval, citations, provider traces, and evaluation.</p>
+      </section>
+      <section class="panel">
+        <textarea id="question">What is SlimX.ai's strongest business wedge for research organizations?</textarea>
+        <p>
+          <button onclick="ask()">Ask</button>
+          <button onclick="runEval()">Run demo eval</button>
+        </p>
+      </section>
+      <section class="panel">
+        <h2>Answer</h2>
+        <pre id="answer">Ready.</pre>
+      </section>
+      <section class="panel">
+        <h2>Retrieved Context</h2>
+        <div id="chunks" class="chunks"></div>
+      </section>
+      <section class="panel">
+        <h2>Evaluation</h2>
+        <pre id="eval">Not run yet.</pre>
+      </section>
+    </main>
+    <script>
+      async function ask() {
+        const question = document.getElementById("question").value;
+        const res = await fetch("/api/ask", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({question})});
+        const data = await res.json();
+        document.getElementById("answer").textContent = data.answer + "\\n\\nTrace: " + JSON.stringify(data.model_trace, null, 2);
+        document.getElementById("chunks").innerHTML = (data.retrieval.chunks || []).map(c => `
+          <article class="chunk">
+            <div class="meta">${c.citation} · score ${Number(c.score).toFixed(4)}</div>
+            <p>${c.text.slice(0, 650)}</p>
+          </article>`).join("");
+      }
+      async function runEval() {
+        const res = await fetch("/api/eval/run", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({})});
+        const data = await res.json();
+        document.getElementById("eval").textContent = data.markdown || JSON.stringify(data, null, 2);
+      }
+    </script>
+  </body>
+</html>

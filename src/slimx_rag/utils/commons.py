@@ -4,7 +4,7 @@ from typing import Optional
 from pathlib import Path
 import json
 from langchain_core.documents import Document
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
 
 def _hash_text(text: str, *, digest_size: int) -> str:
@@ -53,3 +53,16 @@ def _read_jsonl_docs(in_path: Path) -> Iterator[Document]:
                 continue
             rec = json.loads(line)
             yield Document(page_content=rec.get("page_content", "") or "", metadata=rec.get("metadata", {}) or {})
+
+
+def _write_embeddings_jsonl(items: Iterable[Any], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        for item in items:
+            rec = {
+                "chunk_id": item.chunk_id,
+                "vector": item.vector,
+                "text": item.text,
+                "metadata": item.metadata,
+            }
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")

@@ -75,16 +75,19 @@ class FakeConnection:
 
 class FakePsycopg:
     connections: list[FakeConnection] = []
+    rows: dict[str, dict] = {}
 
     @classmethod
     def connect(cls, dsn: str):
         conn = FakeConnection(dsn)
+        conn.rows = cls.rows
         cls.connections.append(conn)
         return conn
 
 
 def install_fake_psycopg(monkeypatch):
     FakePsycopg.connections.clear()
+    FakePsycopg.rows.clear()
     fake = types.SimpleNamespace(connect=FakePsycopg.connect)
     monkeypatch.setitem(sys.modules, "psycopg", fake)
 

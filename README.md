@@ -1,10 +1,10 @@
 # SlimX-RAG
 
-A slim, deterministic RAG *preprocessing* pipeline.
+A slim, deterministic RAG pipeline for customer-demo-ready private knowledge assistants.
 
 What’s implemented today:
 
-**ingest → chunk → embed → index (+ query)**
+**ingest → chunk → embed → index → retrieve → answer → cite → evaluate → serve**
 
 ---
 
@@ -28,6 +28,8 @@ Optional embedding providers:
 ```bash
 uv sync --extra openai   # OpenAI embeddings via langchain-openai
 uv sync --extra hf       # SentenceTransformers embeddings
+uv sync --extra demo     # FastAPI customer demo server
+uv sync --extra doc      # PDF/DOCX loaders
 ```
 
 ### With `pip`
@@ -82,6 +84,7 @@ Then run:
 
 ```bash
 slimx-rag run --kb-dir ./knowledge-base --out-dir ./output
+slimx-rag ask --out-dir ./output --q "What is this knowledge base about?"
 ```
 
 (Or use `uv run slimx-rag run ...` without activating)
@@ -167,7 +170,7 @@ Local (default):
 slimx-rag run --kb-dir ./knowledge-base --out-dir ./output --index-backend local
 ```
 
-FAISS (recommend using an `.faiss` filename):
+FAISS (dimension can be inferred from the first vector; `dim` is optional but useful for empty-index creation):
 
 ```bash
 slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
@@ -303,4 +306,38 @@ src/slimx_rag/
   cli.py
 tests/
 ```
+Skip the embeddings artifact for remote-only deployments:
 
+```bash
+slimx-rag run --kb-dir ./knowledge-base --out-dir ./output --no-embeddings-out
+```
+
+### Retrieve and answer
+
+```bash
+slimx-rag retrieve --out-dir ./output --q "What does the corpus say about edge AI?"
+slimx-rag ask --out-dir ./output --q "What does the corpus say about edge AI?"
+```
+
+Use a real SlimX model for polished demos:
+
+```bash
+export OPENAI_API_KEY="..."
+slimx-rag ask --out-dir ./output --model openai:gpt-4.1-mini --q "Compare SlimX Core and SlimX-RAG."
+```
+
+### Run the research demo
+
+```bash
+uv sync --extra demo
+uv pip install -e ../slimx
+ollama pull llama3.1
+uv run slimx-rag run --kb-dir examples/research_demo/knowledge-base --out-dir output
+OLLAMA_BASE_URL=http://localhost:11434 uv run slimx-rag ask --out-dir output --q "What is SlimX.ai's strongest business wedge for research organizations?" --model ollama:llama3.1
+uv run slimx-rag eval --out-dir output --dataset examples/research_demo/eval/questions.jsonl --out output/eval_report.md
+SLIMX_LLM_MODEL=ollama:llama3.1 OLLAMA_BASE_URL=http://localhost:11434 uv run slimx-rag serve --host 127.0.0.1 --port 8080
+```
+
+Open `http://127.0.0.1:8080`.
+
+Use `--model fake:grounded` when you need a deterministic no-network smoke test.
