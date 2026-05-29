@@ -54,6 +54,16 @@ def _llm_timeout() -> float | None:
     return float(raw) if raw else None
 
 
+def _llm_max_tokens() -> int | None:
+    raw = os.getenv("SLIMX_LLM_MAX_TOKENS", "")
+    return int(raw) if raw else None
+
+
+def _max_context_chars() -> int | None:
+    raw = os.getenv("SLIMX_MAX_CONTEXT_CHARS", "")
+    return int(raw) if raw else None
+
+
 def _check_token(authorization: str | None) -> None:
     token = os.getenv("DEMO_AUTH_TOKEN")
     if not token:
@@ -136,6 +146,8 @@ def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(de
         retrieval,
         model=payload.model or os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
         timeout=_llm_timeout(),
+        max_tokens=_llm_max_tokens(),
+        max_context_chars=_max_context_chars(),
     )
     return result.to_dict()
 
@@ -153,6 +165,8 @@ def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(defau
         model=payload.model or os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
         top_k=payload.top_k or _index_settings().top_k,
         timeout=_llm_timeout(),
+        max_tokens=_llm_max_tokens(),
+        max_context_chars=_max_context_chars(),
     )
     return {"markdown": report.to_markdown(), "cases": report.cases}
 
