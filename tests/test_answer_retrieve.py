@@ -4,7 +4,13 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
-from slimx_rag.answer import answer, build_grounded_prompt, default_timeout_for_model
+from slimx_rag.answer import (
+    answer,
+    build_grounded_prompt,
+    default_max_context_chars_for_model,
+    default_max_tokens_for_model,
+    default_timeout_for_model,
+)
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.index import make_index_backend
 from slimx_rag.retrieve import retrieve
@@ -83,3 +89,24 @@ def test_grounded_prompt_contains_context_and_instruction():
 def test_ollama_uses_longer_default_timeout():
     assert default_timeout_for_model("ollama:llama3.1") == 180.0
     assert default_timeout_for_model("openai:gpt-4.1-mini") is None
+
+
+def test_ollama_uses_smaller_local_generation_defaults():
+    assert default_max_tokens_for_model("ollama:llama3.2:3b") == 256
+    assert default_max_context_chars_for_model("ollama:llama3.2:3b") == 3000
+    assert default_max_tokens_for_model("openai:gpt-4.1-mini") == 700
+
+
+def test_grounded_prompt_can_limit_context_chars():
+    retrieval = type("R", (), {
+        "chunks": [
+            type("C", (), {"citation": "[a.md:0]", "score": 0.9, "text": "A" * 10})(),
+            type("C", (), {"citation": "[b.md:0]", "score": 0.8, "text": "B" * 10})(),
+        ]
+    })()
+
+    prompt = build_grounded_prompt("What?", retrieval, max_context_chars=12)  # type: ignore[arg-type]
+
+    assert "A" * 10 in prompt
+    assert "BB" in prompt
+    assert "B" * 3 not in prompt

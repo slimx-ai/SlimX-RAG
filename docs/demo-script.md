@@ -8,6 +8,6 @@
 6. Ask: “What information is missing from the corpus about pricing?”
 7. Explain that the assistant should refuse or flag insufficient context.
 
-For local demos, prefer Ollama with `SLIMX_LLM_MODEL=ollama:llama3.1` and `OLLAMA_BASE_URL=http://localhost:11434`.
+For local demos, prefer Ollama with `SLIMX_LLM_MODEL=ollama:llama3.2:3b`, `OLLAMA_BASE_URL=http://localhost:11434`, `SLIMX_LLM_MAX_TOKENS=220`, and `SLIMX_MAX_CONTEXT_CHARS=2500`.
 
 If Ollama or the live provider is unavailable, switch `SLIMX_LLM_MODEL=fake:grounded` and continue with the deterministic smoke demo.

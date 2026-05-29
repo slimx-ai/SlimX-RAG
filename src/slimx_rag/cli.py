@@ -502,7 +502,14 @@ def handle_ask(args: argparse.Namespace) -> int:
         state_path=state_path,
         top_k=args.k,
     )
-    result = answer(args.q, retrieval, model=args.model, timeout=args.timeout)
+    result = answer(
+        args.q,
+        retrieval,
+        model=args.model,
+        timeout=args.timeout,
+        max_tokens=args.max_tokens,
+        max_context_chars=args.max_context_chars,
+    )
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0
 
@@ -528,6 +535,8 @@ def handle_eval(args: argparse.Namespace) -> int:
         state_path=state_path,
         top_k=args.k,
         timeout=args.timeout,
+        max_tokens=args.max_tokens,
+        max_context_chars=args.max_context_chars,
     )
     write_eval_report(report, args.out)
     logger.info("Wrote %s", args.out)
@@ -661,6 +670,8 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--k", type=int, default=DEFAULTS.index.top_k, help="Top-k results")
     pa.add_argument("--model", type=str, default="fake:grounded", help="SlimX model id, e.g. openai:gpt-4.1-mini")
     pa.add_argument("--timeout", type=float, default=None, help="LLM request timeout in seconds; Ollama defaults to 180")
+    pa.add_argument("--max-tokens", type=int, default=None, help="LLM output token limit; Ollama defaults to 256")
+    pa.add_argument("--max-context-chars", type=int, default=None, help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000")
     _add_embed_overrides_query(pa)
     pa.set_defaults(func=handle_ask)
 
@@ -671,6 +682,8 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--k", type=int, default=DEFAULTS.index.top_k, help="Top-k results")
     pe.add_argument("--model", type=str, default="fake:grounded")
     pe.add_argument("--timeout", type=float, default=None, help="LLM request timeout in seconds; Ollama defaults to 180")
+    pe.add_argument("--max-tokens", type=int, default=None, help="LLM output token limit; Ollama defaults to 256")
+    pe.add_argument("--max-context-chars", type=int, default=None, help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000")
     _add_embed_overrides_query(pe)
     pe.set_defaults(func=handle_eval)
 

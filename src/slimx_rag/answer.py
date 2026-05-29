@@ -19,6 +19,20 @@ def default_timeout_for_model(model: str) -> Optional[float]:
     return None
 
 
+def default_max_tokens_for_model(model: str) -> Optional[int]:
+    if model.startswith("ollama:"):
+        return 256
+    if model.startswith("fake:"):
+        return None
+    return 700
+
+
+def default_max_context_chars_for_model(model: str) -> Optional[int]:
+    if model.startswith("ollama:"):
+        return 3000
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class AnswerResult:
     question: str
@@ -32,13 +46,26 @@ class AnswerResult:
         return asdict(self)
 
 
-def build_grounded_prompt(question: str, retrieval: RetrievalResult, *, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> str:
+def build_grounded_prompt(
+    question: str,
+    retrieval: RetrievalResult,
+    *,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    max_context_chars: Optional[int] = None,
+) -> str:
     context_blocks = []
+    remaining_chars = max_context_chars
     for i, chunk in enumerate(retrieval.chunks, start=1):
+        if remaining_chars is not None and remaining_chars <= 0:
+            break
+        text = chunk.text
+        if remaining_chars is not None:
+            text = text[:remaining_chars]
+            remaining_chars -= len(text)
         context_blocks.append(
             f"Context {i} {chunk.citation}\n"
             f"Score: {chunk.score:.4f}\n"
-            f"Text:\n{chunk.text}"
+            f"Text:\n{text}"
         )
     context = "\n\n---\n\n".join(context_blocks) or "No retrieved context."
     return (
@@ -56,8 +83,9 @@ def answer(
     model: str = "fake:grounded",
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     temperature: Optional[float] = 0.1,
-    max_tokens: Optional[int] = 700,
+    max_tokens: Optional[int] = None,
     timeout: Optional[float] = None,
+    max_context_chars: Optional[int] = None,
 ) -> AnswerResult:
     warnings: list[str] = []
     citations = [chunk.citation for chunk in retrieval.chunks]
@@ -84,9 +112,18 @@ def answer(
         except Exception as e:  # pragma: no cover - dependency packaging guard
             raise RuntimeError("SlimX answer generation requires the 'slimx' package.") from e
 
-        prompt = build_grounded_prompt(question, retrieval, system_prompt=system_prompt)
+        effective_max_tokens = max_tokens if max_tokens is not None else default_max_tokens_for_model(model)
+        effective_max_context_chars = (
+            max_context_chars if max_context_chars is not None else default_max_context_chars_for_model(model)
+        )
+        prompt = build_grounded_prompt(
+            question,
+            retrieval,
+            system_prompt=system_prompt,
+            max_context_chars=effective_max_context_chars,
+        )
         effective_timeout = timeout if timeout is not None else default_timeout_for_model(model)
-        response = llm(model, temperature=temperature, max_tokens=max_tokens, timeout=effective_timeout)(prompt)
+        response = llm(model, temperature=temperature, max_tokens=effective_max_tokens, timeout=effective_timeout)(prompt)
         text = response.text
         model_trace = dict(getattr(response, "trace", {}) or {})
 
