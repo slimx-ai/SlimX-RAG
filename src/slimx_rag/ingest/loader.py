@@ -72,6 +72,7 @@ def fetch_documents(settings: IndexingPipelineSettings) -> List[Document]:
     Notes:
       - doc_id is *identity* (path-based when possible)
       - content_hash is *version* (content-based)
+      - content_len counts the exact loaded text, including final newline characters
     """
 
     settings.ingest.validate()
