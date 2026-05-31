@@ -7,7 +7,7 @@ from typing import Iterable, List, Optional
 from langchain_core.documents import Document
 
 from slimx_rag.settings import IndexingPipelineSettings
-from slimx_rag.utils.commons import _content_hash, _hash_path, _hash_text
+from slimx_rag.core.hashing import content_hash, fallback_doc_id, path_id
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +51,9 @@ def _read_text_path(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _fallback_doc_id(source: str, content_hash: str) -> str:
+def _fallback_doc_id(source: str, content_hash_value: str) -> str:
     # identity for docs with no stable kb_relpath: stable for same source+content
-    payload = f"fallback\n{source}\n{content_hash}"
-    return _hash_text(payload, digest_size=32)
+    return fallback_doc_id(source, content_hash_value)
 
 
 def fetch_documents(settings: IndexingPipelineSettings) -> List[Document]:
@@ -94,11 +93,11 @@ def fetch_documents(settings: IndexingPipelineSettings) -> List[Document]:
         metadata = {
             "source": str(source_path),
             "title": source_path.stem,
-            "content_hash": _content_hash(text),
+            "content_hash": content_hash(text),
             "content_len": len(text),
             "kb_relpath": relpath.as_posix(),
             "file_ext": relpath.suffix.lower().lstrip("."),
-            "doc_id": _hash_path(relpath.as_posix()),
+            "doc_id": path_id(relpath.as_posix()),
             "doc_type": (
                 _doc_type_from_relpath(relpath, depth=settings.ingest.doc_type_depth)
                 if settings.ingest.doc_type_mode == "subdir"

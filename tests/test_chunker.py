@@ -3,6 +3,7 @@ from __future__ import annotations
 from langchain_core.documents import Document
 
 from slimx_rag.chunk import chunk_documents
+from slimx_rag.core.hashing import DEFAULT_HASH_POLICY
 from slimx_rag.settings import ChunkSettings
 
 
@@ -51,7 +52,7 @@ def test_chunk_preserves_parent_metadata_and_adds_chunk_fields():
         assert c.metadata["parent_doc_type"] == "company"
         assert "chunk_id" in c.metadata
         assert isinstance(c.metadata["chunk_id"], str)
-        assert len(c.metadata["chunk_id"]) == 32  # blake2b digest_size=16 => 32 hex chars
+        assert len(c.metadata["chunk_id"]) == DEFAULT_HASH_POLICY.chunk_id_digest_size * 2
 
 
 def test_chunk_validates_parameters():

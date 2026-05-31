@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Iterable, List, Sequence, Tuple
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from slimx_rag.utils.commons import _hash_text
+from slimx_rag.core.hashing import (
+    chunk_config_fingerprint,
+    content_hash as compute_content_hash,
+    make_chunk_id,
+)
 
 def _stable_doc_sort_key(doc: Document) -> Tuple[str, str]:
     """
@@ -33,9 +36,12 @@ def _chunk_config_fingerprint(
     chunk_overlap: int,
     separators: Sequence[str],
 ) -> str:
-    """Fingerprint chunking params so chunk_id changes when config changes."""
-    seps = "\u241E".join(separators)  # record separators unambiguously
-    return _hash_text(f"{chunk_size}|{chunk_overlap}|{seps}", digest_size=8)
+    """Backward-compatible wrapper for the central chunk config fingerprint."""
+    return chunk_config_fingerprint(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=separators,
+    )
 
 
 def _make_chunk_id(
@@ -45,21 +51,13 @@ def _make_chunk_id(
     chunk_index: int,
     chunk_cfg_hash: str,
 ) -> str:
-    """
-    Create a stable chunk ID.
-
-    Uses doc identity + doc version + chunk params + index.
-    This avoids hashing the full chunk text (faster) while staying deterministic.
-    """
-    h = hashlib.blake2b(digest_size=16)
-    h.update(parent_id.encode("utf-8", errors="ignore"))
-    h.update(b"\n")
-    h.update(content_hash.encode("utf-8", errors="ignore"))
-    h.update(b"\n")
-    h.update(chunk_cfg_hash.encode("utf-8", errors="ignore"))
-    h.update(b"\n")
-    h.update(str(chunk_index).encode("utf-8"))
-    return h.hexdigest()
+    """Backward-compatible wrapper for the central chunk ID builder."""
+    return make_chunk_id(
+        parent_id=parent_id,
+        content_hash_value=content_hash,
+        chunk_index=chunk_index,
+        chunk_cfg_hash=chunk_cfg_hash,
+    )
 
 
 def chunk_documents(
@@ -117,7 +115,7 @@ def chunk_documents(
         if doc.metadata.get("content_hash"):
             content_hash = str(doc.metadata["content_hash"])
         else:
-            content_hash = _hash_text(doc.page_content or "", digest_size=16)
+            content_hash = compute_content_hash(doc.page_content or "")
 
         parent_id_for_hash = parent_doc_id or parent_kb_relpath or str(doc.metadata.get("source", ""))
 

@@ -1,4 +1,3 @@
-import hashlib
 import unicodedata
 from typing import Optional
 from pathlib import Path
@@ -6,22 +5,8 @@ import json
 from langchain_core.documents import Document
 from typing import Any, Iterable, Iterator
 
+from slimx_rag.core.hashing import _content_hash, _hash_path, _hash_text
 
-def _hash_text(text: str, *, digest_size: int) -> str:
-    h = hashlib.blake2b(digest_size=digest_size)
-    h.update(text.encode("utf-8"))
-    return h.hexdigest()
-
-
-def _hash_path(kb_relpath: str) -> str:
-    # doc identity: stable across edits as long as path stays stable
-    return _hash_text(kb_relpath, digest_size=32)
-
-
-# move to utils
-def _content_hash(text: str) -> str:
-    # doc version fingerprint: changes when content changes (supports incremental indexing later)
-    return _hash_text(text or "", digest_size=16)
 
 
 def _normalize_text(text: str, *, max_chars: Optional[int], normalize: bool) -> str:
