@@ -49,6 +49,12 @@ dev = [
   "build>=1.2",
 ]
 
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "build>=1.2",
+]
+
 [project.scripts]
 slimx-rag = "slimx_rag.cli:main"
 

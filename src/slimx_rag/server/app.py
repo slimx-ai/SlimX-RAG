@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from slimx_rag.answer import answer
 from slimx_rag.eval import load_eval_cases, run_eval
-from slimx_rag.retrieve import retrieve
+from slimx_rag.retrieval import retrieve
 from slimx_rag.settings import EmbedSettings, IndexSettings
 
 
@@ -173,5 +173,5 @@ def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(defau
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    static = Path(__file__).parent / "static" / "index.html"
+    static = Path(__file__).resolve().parents[1] / "static" / "index.html"
     return static.read_text(encoding="utf-8")

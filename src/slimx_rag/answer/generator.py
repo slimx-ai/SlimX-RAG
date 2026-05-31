@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
-from slimx_rag.retrieve import RetrievalResult
+from slimx_rag.retrieval import RetrievalResult
 
 
 DEFAULT_SYSTEM_PROMPT = (

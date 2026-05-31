@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from slimx_rag.answer import answer
-from slimx_rag.retrieve import retrieve
+from slimx_rag.retrieval import retrieve
 from slimx_rag.settings import EmbedSettings, IndexSettings
 
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from slimx_rag.ingest.loader import fetch_documents
 from slimx_rag.settings import IndexingPipelineSettings
 
-settings = IndexingPipelineSettings(kb_dir=Path("knowledge-base"))
+settings = IndexingPipelineSettings(kb_dir=Path("examples/tiny_demo/knowledge-base"))
 docs = fetch_documents(settings=settings)
 ```
 

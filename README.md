@@ -64,14 +64,11 @@ pytest -q
 
 ## Quickstart: run the full pipeline
 
-1) Put Markdown documents under a knowledge base folder:
+1) Use one of the example knowledge bases, or put Markdown documents under your own folder:
 
 ```text
-knowledge-base/
-  company/
-    about.md
-  products/
-    overview.md
+examples/tiny_demo/knowledge-base/
+  overview.md
 ```
 
 2) Activate the venv:
@@ -83,7 +80,7 @@ source .venv/bin/activate
 Then run:
 
 ```bash
-slimx-rag run --kb-dir ./knowledge-base --out-dir ./output
+slimx-rag run --kb-dir examples/tiny_demo/knowledge-base --out-dir ./output
 slimx-rag ask --out-dir ./output --q "What is this knowledge base about?"
 ```
 
@@ -103,7 +100,7 @@ Outputs:
 ### 1) Ingest
 
 ```bash
-slimx-rag ingest --kb-dir ./knowledge-base --out ./output/docs.jsonl
+slimx-rag ingest --kb-dir examples/tiny_demo/knowledge-base --out ./output/docs.jsonl
 ```
 
 Defaults:
@@ -112,7 +109,7 @@ Defaults:
 Override the glob:
 
 ```bash
-slimx-rag ingest --kb-dir ./knowledge-base --glob "**/*.txt" --out ./output/docs.jsonl
+slimx-rag ingest --kb-dir examples/tiny_demo/knowledge-base --glob "**/*.txt" --out ./output/docs.jsonl
 ```
 
 ### 2) Chunk
@@ -167,13 +164,13 @@ uv sync --extra pgvector
 Local (default):
 
 ```bash
-slimx-rag run --kb-dir ./knowledge-base --out-dir ./output --index-backend local
+slimx-rag run --kb-dir examples/insurance_demo/knowledge-base --out-dir ./output --index-backend local
 ```
 
 FAISS (dimension can be inferred from the first vector; `dim` is optional but useful for empty-index creation):
 
 ```bash
-slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+slimx-rag run --kb-dir examples/insurance_demo/knowledge-base --out-dir ./output \
   --index-backend faiss \
   --backend-config '{"dim": 384}'
 ```
@@ -181,7 +178,7 @@ slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
 Qdrant:
 
 ```bash
-slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+slimx-rag run --kb-dir examples/insurance_demo/knowledge-base --out-dir ./output \
   --index-backend qdrant \
   --backend-config '{"url":"http://localhost:6333","collection":"slimx"}'
 ```
@@ -189,7 +186,7 @@ slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
 pgvector:
 
 ```bash
-slimx-rag run --kb-dir ./knowledge-base --out-dir ./output \
+slimx-rag run --kb-dir examples/insurance_demo/knowledge-base --out-dir ./output \
   --index-backend pgvector \
   --backend-config '{"dsn":"postgresql://user:pass@localhost:5432/db","table":"slimx_vectors"}'
 ```
@@ -205,7 +202,7 @@ from pathlib import Path
 from slimx_rag.ingest.loader import fetch_documents
 from slimx_rag.settings import IndexingPipelineSettings
 
-settings = IndexingPipelineSettings(kb_dir=Path("./knowledge-base"))
+settings = IndexingPipelineSettings(kb_dir=Path("examples/tiny_demo/knowledge-base"))
 docs = fetch_documents(settings=settings)
 print(len(docs), docs[0].metadata)
 ```
@@ -302,6 +299,10 @@ src/slimx_rag/
   chunk/    # deterministic splitting + chunk_id
   embed/    # embedding providers + batching + retry
   index/    # naive cosine index + query
+  retrieval/ # retrieval result mapping + citations
+  answer/   # grounded answer generation
+  eval/     # demo evaluation runner
+  server/   # FastAPI demo app
   settings.py
   cli.py
 tests/
@@ -309,7 +310,7 @@ tests/
 Skip the embeddings artifact for remote-only deployments:
 
 ```bash
-slimx-rag run --kb-dir ./knowledge-base --out-dir ./output --no-embeddings-out
+slimx-rag run --kb-dir examples/insurance_demo/knowledge-base --out-dir ./output --no-embeddings-out
 ```
 
 ### Retrieve and answer

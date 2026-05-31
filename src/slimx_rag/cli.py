@@ -14,7 +14,7 @@ from slimx_rag.embed import embed_chunks, make_embedder
 from slimx_rag.index import make_index_backend
 from slimx_rag.answer import answer
 from slimx_rag.eval import load_eval_cases, run_eval, write_eval_report
-from slimx_rag.retrieve import retrieve
+from slimx_rag.retrieval import retrieve
 from slimx_rag.settings import (
     ChunkSettings,
     EmbedSettings,
