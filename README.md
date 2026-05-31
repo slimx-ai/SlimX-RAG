@@ -20,7 +20,7 @@ uv sync
 with extra dependencies 
 
 ```bash
-uv sync --extra dev
+uv sync --group dev
 ```
 
 Optional embedding providers:
@@ -52,7 +52,7 @@ source .venv/bin/activate
 Then run:
 
 ```bash
-# requires uv sync --extra dev
+# requires uv sync --group dev
 pytest
 # or
 pytest -q
@@ -91,7 +91,39 @@ Outputs:
 - `output/docs.jsonl` (raw documents + metadata)
 - `output/chunks.jsonl` (deterministic chunks)
 - `output/embeddings.jsonl` (vectors; default provider is offline `hash`)
-- `output/index.jsonl` (simple cosine index; for small corpora)
+- `output/index.jsonl` (vector index records; for small corpora with the local backend)
+- `output/index_state.json` (embedding config and incremental index state)
+- `output/manifest.json` (optional RAGOps build manifest when requested)
+
+---
+
+
+## RAGOps artifacts
+
+SlimX-RAG can generate reproducibility and inspection artifacts for deterministic, auditable RAG indexing:
+
+- `manifest.json` records what was built, including artifact counts, embedding settings, backend information, chunk config, and the centralized hash policy.
+- `slimx-rag diff` compares two builds by documents, chunks, and available config metadata.
+- `slimx-rag report` summarizes index quality, metadata coverage, duplicates, near-empty chunks, backend details, and warnings.
+
+Generate and inspect RAGOps artifacts:
+
+```bash
+slimx-rag run --kb-dir examples/tiny_demo/knowledge-base --out-dir ./output --write-manifest
+slimx-rag manifest --out-dir ./output
+slimx-rag diff ./output-v1 ./output-v2
+slimx-rag diff ./output-v1 ./output-v2 --format json
+slimx-rag report --out-dir ./output --format markdown
+slimx-rag report --out-dir ./output --format json
+```
+
+Expected RAGOps output files:
+
+- `output/manifest.json` — pretty JSON build manifest for reproducibility and audits.
+- `slimx-rag diff ...` — text or JSON comparison output; it does not write files by default.
+- `slimx-rag report ...` — Markdown or JSON report printed to stdout.
+
+These modules are intended for reproducible, auditable RAGOps for private/local AI systems without changing the ingest, chunk, embed, index, or query artifacts.
 
 ---
 
@@ -239,14 +271,17 @@ print(embs[0].chunk_id, len(embs[0].vector))
 
 ```python
 from pathlib import Path
-from slimx_rag.index import NaiveIndex
+from slimx_rag.index import make_index_backend
 from slimx_rag.embed import make_embedder
-from slimx_rag.settings import EmbedSettings
+from slimx_rag.settings import EmbedSettings, IndexSettings
 
-idx = NaiveIndex.load(Path("./output/index.jsonl"))
+index_path = Path("./output/index.jsonl")
+index_settings = IndexSettings(backend="local")
+idx = make_index_backend(index_path, settings=index_settings)
+idx.load()
 eset = EmbedSettings(provider="hash", dim=idx.dim or 384)
 qvec = make_embedder(eset).embed_texts(["what is this knowledge base about"])[0]
-results = idx.search(list(map(float, qvec)), top_k=5)
+results = idx.query(list(map(float, qvec)), top_k=5)
 print(results[0].chunk_id, results[0].score)
 ```
 
@@ -275,7 +310,7 @@ Each line is:
 Each line is:
 
 ```json
-{"chunk_id": "...", "vector": [0.1, -0.2, ...], "norm": 12.34, "text": "...", "metadata": {"kb_relpath": "..."}}
+{"chunk_id": "...", "vector": [0.1, -0.2, ...], "text": "...", "metadata": {"kb_relpath": "..."}}
 ```
 
 ---
@@ -287,7 +322,7 @@ Each line is:
 - **Chunking** sorts documents by a stable key (`kb_relpath/source/doc_id`) before splitting.
 - **Chunk IDs** are stable hashes of `(parent identity, content_hash, chunk config, chunk_index)`.
 - **Embedding** can be run offline (`hash`) so tests and CI don’t depend on network calls.
-- **Indexing** precomputes vector norms to make cosine search fast and deterministic.
+- **Indexing** stores vectors deterministically; the local backend computes vector norms when loading/querying for fast cosine search.
 
 ---
 
@@ -298,11 +333,14 @@ src/slimx_rag/
   ingest/   # load docs + baseline metadata
   chunk/    # deterministic splitting + chunk_id
   embed/    # embedding providers + batching + retry
-  index/    # naive cosine index + query
+  index/    # backend plugins + vector query
   retrieval/ # retrieval result mapping + citations
   answer/   # grounded answer generation
   eval/     # demo evaluation runner
   server/   # FastAPI demo app
+  manifest/ # RAGOps build manifests
+  diff/     # RAGOps build comparisons
+  report/   # RAGOps quality reports
   settings.py
   cli.py
 tests/
