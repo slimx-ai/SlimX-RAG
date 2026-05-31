@@ -2,7 +2,7 @@
 
 This folder contains SlimX-RAG's **index backends** (vector storage + similarity search) implemented as **plugins**.
 
-**Design goal:** the pipeline (ingest → chunk → embed → index → query) must not care whether you use:
+**Design goal:** the pipeline (ingest → chunk → embed → index → retrieve/query) must not care whether you use:
 
 - Local JSONL (MVP)
 - FAISS

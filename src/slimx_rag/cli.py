@@ -12,6 +12,9 @@ from slimx_rag.ingest.loader import fetch_documents
 from slimx_rag.chunk import chunk_documents
 from slimx_rag.embed import embed_chunks, make_embedder
 from slimx_rag.index import make_index_backend
+from slimx_rag.diff import build_diff, format_diff_text
+from slimx_rag.manifest import write_manifest
+from slimx_rag.report import build_report, format_report_markdown
 from slimx_rag.answer import answer
 from slimx_rag.eval import load_eval_cases, run_eval, write_eval_report
 from slimx_rag.retrieval import retrieve
@@ -384,6 +387,33 @@ def handle_run(args: argparse.Namespace) -> int:
     if state_path:
         logger.info("State: %s", state_path)
     logger.info("Deleted stale: %s, Upserted: %s (Total: %s)", deleted, written, total)
+    if getattr(args, "write_manifest", False):
+        manifest_path = write_manifest(settings.out_dir, settings=settings)
+        logger.info("Manifest: %s", manifest_path)
+    return 0
+
+
+def handle_manifest(args: argparse.Namespace) -> int:
+    path = write_manifest(args.out_dir)
+    print(str(path))
+    return 0
+
+
+def handle_diff(args: argparse.Namespace) -> int:
+    result = build_diff(args.old_dir, args.new_dir)
+    if args.format == "json":
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(format_diff_text(result), end="")
+    return 0
+
+
+def handle_report(args: argparse.Namespace) -> int:
+    result = build_report(args.out_dir)
+    if args.format == "json":
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(format_report_markdown(result), end="")
     return 0
 
 
@@ -694,8 +724,25 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--reload", action="store_true")
     ps.set_defaults(func=handle_serve)
 
+    # manifest
+    pm = sub.add_parser("manifest", parents=[p_out], help="Write manifest.json for an output directory")
+    pm.set_defaults(func=handle_manifest)
+
+    # diff
+    pd = sub.add_parser("diff", help="Compare two SlimX-RAG output directories")
+    pd.add_argument("old_dir", type=Path, help="Older output directory")
+    pd.add_argument("new_dir", type=Path, help="Newer output directory")
+    pd.add_argument("--format", choices=("text", "json"), default="text", help="Output format")
+    pd.set_defaults(func=handle_diff)
+
+    # report
+    prep = sub.add_parser("report", parents=[p_out], help="Summarize RAG output quality and metadata coverage")
+    prep.add_argument("--format", choices=("json", "markdown"), default="markdown", help="Output format")
+    prep.set_defaults(func=handle_report)
+
     # run
     pr = sub.add_parser("run", parents=[p_out, p_ing, p_chk, p_emb, p_idx], help="ingest -> chunk -> index")
+    pr.add_argument("--write-manifest", action="store_true", help="Write manifest.json after a successful run")
     pr.set_defaults(func=handle_run)
 
     return p
