@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from slimx_rag.answer import answer
 from slimx_rag.eval import load_eval_cases, run_eval
@@ -18,7 +18,13 @@ from slimx_rag.settings import EmbedSettings, IndexSettings
 def _backend_config() -> dict[str, object]:
     raw = os.getenv("RAG_BACKEND_CONFIG", "")
     if raw:
-        return json.loads(raw)
+        try:
+            cfg = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=500, detail=f"Invalid RAG_BACKEND_CONFIG: {e}") from e
+        if not isinstance(cfg, dict):
+            raise HTTPException(status_code=500, detail="Invalid RAG_BACKEND_CONFIG: must be a JSON object")
+        return cfg
     if os.getenv("RAG_INDEX_BACKEND", "local") == "qdrant":
         return {
             "url": os.getenv("QDRANT_URL", "http://qdrant:6333"),
@@ -78,13 +84,13 @@ def _check_token(authorization: str | None) -> None:
 class QuestionRequest(BaseModel):
     question: str
     model: str | None = None
-    top_k: int | None = None
+    top_k: int | None = Field(default=None, gt=0)
 
 
 class EvalRequest(BaseModel):
     dataset: str = "examples/research_demo/eval/questions.jsonl"
     model: str | None = None
-    top_k: int | None = None
+    top_k: int | None = Field(default=None, gt=0)
 
 
 app = FastAPI(title="SlimX-RAG Research Demo")
@@ -179,4 +185,6 @@ def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(defau
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     static = Path(__file__).resolve().parents[1] / "static" / "index.html"
+    if not static.exists():
+        raise HTTPException(status_code=404, detail="Demo UI not installed")
     return static.read_text(encoding="utf-8")

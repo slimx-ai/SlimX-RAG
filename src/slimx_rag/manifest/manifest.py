@@ -8,6 +8,7 @@ from typing import Any
 
 from slimx_rag.core.hashing import DEFAULT_HASH_POLICY
 from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexingPipelineSettings
+from slimx_rag.utils.commons import _atomic_write_text
 
 SCHEMA_VERSION = "manifest-v1"
 MANIFEST_FILENAME = "manifest.json"
@@ -166,5 +167,5 @@ def write_manifest(
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = build_manifest(out_dir, settings=settings, created_at=created_at)
     path = out_dir / MANIFEST_FILENAME
-    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _atomic_write_text(path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     return path

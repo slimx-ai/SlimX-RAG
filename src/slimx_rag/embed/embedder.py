@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator
@@ -10,6 +11,8 @@ from langchain_core.documents import Document
 
 from slimx_rag.settings import EmbedSettings
 from slimx_rag.utils.commons import _normalize_text
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,10 +204,17 @@ def embed_chunks(
             batch_texts.clear()
 
 
+    empty_count = 0
     for d in chunks:
         batch_docs.append(d)
         batch_texts.append(d.page_content or "")
+        if not (d.page_content or "").strip():
+            empty_count += 1
         if len(batch_docs) >= bs:
             yield from flush()
 
     yield from flush()
+    if empty_count:
+        # Still embedded (dropping them would change chunk counts and break
+        # reproducibility of existing indexes), but they add no retrieval value.
+        logger.warning("Embedded %d empty-text chunk(s); they add no retrieval value", empty_count)

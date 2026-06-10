@@ -645,6 +645,7 @@ def _add_index_files_args(p: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="slimx-rag", description="SlimX-RAG CLI")
+    p.add_argument("--verbose", action="store_true", help="Enable debug logging (includes tracebacks on errors)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_out = argparse.ArgumentParser(add_help=False)
@@ -756,9 +757,20 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
         args = build_parser().parse_args(argv)
+        if getattr(args, "verbose", False):
+            logging.getLogger().setLevel(logging.DEBUG)
         return int(args.func(args))
+    except KeyboardInterrupt:
+        logger.error("Interrupted.")
+        return 130
+    except (ValueError, FileNotFoundError, NotADirectoryError) as e:
+        # User-input errors (bad paths, bad config, malformed files): exit 2 like argparse.
+        logger.error("Error: %s", e)
+        logger.debug("Traceback:", exc_info=True)
+        return 2
     except Exception as e:
         logger.error("Error: %s", e)
+        logger.debug("Traceback:", exc_info=True)
         return 1
 
 

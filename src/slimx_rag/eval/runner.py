@@ -7,6 +7,7 @@ from pathlib import Path
 from slimx_rag.answer import answer
 from slimx_rag.retrieval import retrieve
 from slimx_rag.settings import EmbedSettings, IndexSettings
+from slimx_rag.utils.commons import _atomic_write_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,11 +43,18 @@ class EvalReport:
 
 
 def load_eval_cases(path: Path) -> list[EvalCase]:
+    if not path.exists():
+        raise FileNotFoundError(f"Evaluation dataset not found: {path}")
     cases: list[EvalCase] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
-        obj = json.loads(line)
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Malformed JSONL in {path} at line {line_no}: {e}") from e
+        if not isinstance(obj, dict) or "question" not in obj:
+            raise ValueError(f"Malformed eval case in {path} at line {line_no}: expected an object with a 'question'")
         cases.append(
             EvalCase(
                 question=str(obj["question"]),
@@ -124,8 +132,7 @@ def run_eval(
 
 
 def write_eval_report(report: EvalReport, out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.suffix.lower() == ".json":
-        out_path.write_text(json.dumps(asdict(report), ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_text(out_path, json.dumps(asdict(report), ensure_ascii=False, indent=2))
     else:
-        out_path.write_text(report.to_markdown(), encoding="utf-8")
+        _atomic_write_text(out_path, report.to_markdown())

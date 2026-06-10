@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -9,9 +10,12 @@ import numpy as np
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import IndexSettings
+from slimx_rag.utils.commons import _atomic_write_text
 
 from .base import IndexBackend, config_int
 from .types import IndexState, SearchResult
+
+logger = logging.getLogger(__name__)
 
 
 def _l2_normalize(arr: np.ndarray) -> np.ndarray:
@@ -65,8 +69,8 @@ class FaissIndexBackend(IndexBackend):
             # infer dim
             try:
                 self._dim = int(self._index.d)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Could not infer FAISS index dim from %s: %s", self.index_path, e)
         else:
             # create empty only if backend_config['dim'] explicitly constrains storage
             dim = config_int(self.settings.backend_config, "dim", 0)
@@ -110,7 +114,7 @@ class FaissIndexBackend(IndexBackend):
             "id_to_chunk": self._id_to_chunk,
             "payload": {k: {"text": v[0], "metadata": v[1]} for k, v in self._payload.items()},
         }
-        self._meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_text(self._meta_path, json.dumps(meta, ensure_ascii=False, indent=2))
 
         self._save_state_if_enabled()
 

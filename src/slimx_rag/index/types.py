@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from slimx_rag.utils.commons import _atomic_write_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,16 +33,22 @@ class IndexState:
     def load(cls, path: Path) -> IndexState:
         if not path.exists():
             return cls()
-        data = json.loads(path.read_text(encoding="utf-8"))
-        st = cls()
-        st.version = int(data.get("version", 1))
-        st.embed = data.get("embed")
-        st.docs = dict(data.get("docs", {}) or {})
-        return st
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("state must be a JSON object")
+            st = cls()
+            st.version = int(data.get("version", 1))
+            st.embed = data.get("embed")
+            st.docs = dict(data.get("docs", {}) or {})
+            return st
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as e:
+            # Never auto-reset: silently discarding state would make incremental
+            # indexing skip or duplicate chunks unpredictably.
+            raise RuntimeError(
+                f"Corrupt index state file {path}: {e}. Fix or delete it (deleting forces a full reindex)."
+            ) from e
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"version": self.version, "embed": self.embed, "docs": self.docs}
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        _atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))

@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import math
-import os
-import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import IndexSettings
+from slimx_rag.utils.commons import _atomic_write_lines
 
 from .base import IndexBackend
 from .types import IndexState, SearchResult
@@ -89,25 +88,15 @@ class LocalJsonlIndexBackend(IndexBackend):
         self.state = IndexState.load(self.state_path)
 
     def save(self) -> None:
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-
         # deterministic order for reproducible builds
         items_sorted = sorted(self._items.items(), key=lambda kv: kv[0])
-
-        fd, tmp_path = tempfile.mkstemp(prefix="index_", suffix=".jsonl", dir=str(self.index_path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                for cid, (vec, _n, txt, md) in items_sorted:
-                    rec = {"chunk_id": cid, "vector": vec, "text": txt, "metadata": md}
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            os.replace(tmp_path, self.index_path)
-        finally:
-            try:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-            except Exception:
-                pass
-
+        _atomic_write_lines(
+            self.index_path,
+            (
+                json.dumps({"chunk_id": cid, "vector": vec, "text": txt, "metadata": md}, ensure_ascii=False) + "\n"
+                for cid, (vec, _n, txt, md) in items_sorted
+            ),
+        )
         self._save_state_if_enabled()
 
     def delete(self, chunk_ids: Iterable[str]) -> int:
