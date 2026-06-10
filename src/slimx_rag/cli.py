@@ -5,28 +5,28 @@ import json
 import logging
 from dataclasses import asdict, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-from slimx_rag.utils.commons import _read_jsonl_docs, _write_embeddings_jsonl, _write_jsonl
-from slimx_rag.ingest.loader import fetch_documents
+from slimx_rag.answer import answer
 from slimx_rag.chunk import chunk_documents
-from slimx_rag.embed import embed_chunks, make_embedder
-from slimx_rag.index import make_index_backend
 from slimx_rag.diff import build_diff, format_diff_text
+from slimx_rag.embed import embed_chunks, make_embedder
+from slimx_rag.eval import load_eval_cases, run_eval, write_eval_report
+from slimx_rag.index import make_index_backend
+from slimx_rag.ingest.loader import fetch_documents
 from slimx_rag.manifest import write_manifest
 from slimx_rag.report import build_report, format_report_markdown
-from slimx_rag.answer import answer
-from slimx_rag.eval import load_eval_cases, run_eval, write_eval_report
 from slimx_rag.retrieval import retrieve
 from slimx_rag.settings import (
+    EMBED_PROVIDERS,
+    INDEX_BACKENDS,
     ChunkSettings,
     EmbedSettings,
     IndexingPipelineSettings,
-    IngestSettings,
     IndexSettings,
-    EMBED_PROVIDERS,
-    INDEX_BACKENDS,
+    IngestSettings,
 )
+from slimx_rag.utils.commons import _read_jsonl_docs, _write_embeddings_jsonl, _write_jsonl
 
 logger = logging.getLogger(__name__)
 DEFAULTS = IndexingPipelineSettings()
@@ -52,21 +52,21 @@ def _parse_backend_config(raw: str) -> dict[str, object]:
     return obj
 
 
-def _parse_meta_keep(raw: str) -> Optional[List[str]]:
+def _parse_meta_keep(raw: str) -> list[str] | None:
     keys = [k.strip() for k in (raw or "").split(",") if k.strip()]
     return keys or None
 
 
-def _resolve_index_path(args_index: Optional[Path], out_dir: Path) -> Path:
+def _resolve_index_path(args_index: Path | None, out_dir: Path) -> Path:
     return args_index or out_dir / DEFAULTS.index_filename
 
 
 def _resolve_state_path(
     *,
-    args_state: Optional[Path],
+    args_state: Path | None,
     index_path: Path,
     index_settings: IndexSettings,
-) -> Optional[Path]:
+) -> Path | None:
     # explicit wins; else follow index location (more robust than out_dir-only)
     if args_state is not None:
         return args_state
@@ -83,7 +83,7 @@ def _backend_uses_local_index_file(index_settings: IndexSettings) -> bool:
 # Incremental state scan (kept explicit + well-documented)
 # =============================================================================
 
-def _scan_chunks_for_state(in_path: Path) -> Dict[str, Tuple[str, List[str]]]:
+def _scan_chunks_for_state(in_path: Path) -> dict[str, tuple[str, list[str]]]:
     """
     Build a doc-level "state view" used for incremental indexing.
 
@@ -100,7 +100,7 @@ def _scan_chunks_for_state(in_path: Path) -> Dict[str, Tuple[str, List[str]]]:
     if not in_path.exists():
         raise FileNotFoundError(f"Input chunks file not found: {in_path}")
 
-    out: Dict[str, Tuple[str, List[str]]] = {}
+    out: dict[str, tuple[str, list[str]]] = {}
     skipped = missing_doc = missing_chunk = 0
 
     for d in _read_jsonl_docs(in_path):
@@ -144,10 +144,10 @@ def _index_chunks_file(
     embed_settings: EmbedSettings,
     index_settings: IndexSettings,
     index_path: Path,
-    state_path: Optional[Path],
+    state_path: Path | None,
     reindex: bool,
-    embeddings_out_path: Optional[Path] = None,
-) -> Tuple[int, int, int]:
+    embeddings_out_path: Path | None = None,
+) -> tuple[int, int, int]:
     """
     Embed + upsert chunks, with incremental cleanup.
 
@@ -177,14 +177,14 @@ def _index_chunks_file(
 
 def _embed_settings_from_state_with_overrides(
     *,
-    saved_cfg: Optional[dict[str, Any]],
-    provider: Optional[str],
-    model: Optional[str],
-    hf_model: Optional[str],
-    dim: Optional[int],
-    batch_size: Optional[int],
-    max_chars: Optional[int],
-    normalize_text: Optional[bool],
+    saved_cfg: dict[str, Any] | None,
+    provider: str | None,
+    model: str | None,
+    hf_model: str | None,
+    dim: int | None,
+    batch_size: int | None,
+    max_chars: int | None,
+    normalize_text: bool | None,
 ) -> EmbedSettings:
     """
     Query-time embedding settings:
@@ -464,7 +464,7 @@ def handle_query(args: argparse.Namespace) -> int:
     return 0
 
 
-def _make_embed_settings_for_query(args: argparse.Namespace, idx_state_embed: Optional[dict[str, Any]]) -> EmbedSettings:
+def _make_embed_settings_for_query(args: argparse.Namespace, idx_state_embed: dict[str, Any] | None) -> EmbedSettings:
     return _embed_settings_from_state_with_overrides(
         saved_cfg=idx_state_embed or {},
         provider=args.embed_provider,
@@ -477,7 +477,7 @@ def _make_embed_settings_for_query(args: argparse.Namespace, idx_state_embed: Op
     )
 
 
-def _load_embed_state(index_path: Path, index_settings: IndexSettings, state_path: Optional[Path]) -> dict[str, Any]:
+def _load_embed_state(index_path: Path, index_settings: IndexSettings, state_path: Path | None) -> dict[str, Any]:
     idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)
     idx.load()
     return dict(getattr(idx.state, "embed", None) or {})
@@ -699,9 +699,11 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--q", type=str, required=True, help="Question")
     pa.add_argument("--k", type=int, default=DEFAULTS.index.top_k, help="Top-k results")
     pa.add_argument("--model", type=str, default="fake:grounded", help="SlimX model id, e.g. openai:gpt-4.1-mini")
-    pa.add_argument("--timeout", type=float, default=None, help="LLM request timeout in seconds; Ollama defaults to 180")
+    pa.add_argument("--timeout", type=float, default=None,
+                    help="LLM request timeout in seconds; Ollama defaults to 180")
     pa.add_argument("--max-tokens", type=int, default=None, help="LLM output token limit; Ollama defaults to 256")
-    pa.add_argument("--max-context-chars", type=int, default=None, help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000")
+    pa.add_argument("--max-context-chars", type=int, default=None,
+                    help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000")
     _add_embed_overrides_query(pa)
     pa.set_defaults(func=handle_ask)
 
@@ -711,9 +713,11 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--out", type=Path, default=Path("output/eval_report.md"), help="Markdown or JSON report path")
     pe.add_argument("--k", type=int, default=DEFAULTS.index.top_k, help="Top-k results")
     pe.add_argument("--model", type=str, default="fake:grounded")
-    pe.add_argument("--timeout", type=float, default=None, help="LLM request timeout in seconds; Ollama defaults to 180")
+    pe.add_argument("--timeout", type=float, default=None,
+                    help="LLM request timeout in seconds; Ollama defaults to 180")
     pe.add_argument("--max-tokens", type=int, default=None, help="LLM output token limit; Ollama defaults to 256")
-    pe.add_argument("--max-context-chars", type=int, default=None, help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000")
+    pe.add_argument("--max-context-chars", type=int, default=None,
+                    help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000")
     _add_embed_overrides_query(pe)
     pe.set_defaults(func=handle_eval)
 
@@ -748,7 +752,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
         args = build_parser().parse_args(argv)

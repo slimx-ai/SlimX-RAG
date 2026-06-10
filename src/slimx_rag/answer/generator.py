@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Optional
+from typing import Any
 
 from slimx_rag.retrieval import RetrievalResult
-
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a research AI assistant. Answer only from the retrieved context. "
@@ -13,13 +12,13 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
-def default_timeout_for_model(model: str) -> Optional[float]:
+def default_timeout_for_model(model: str) -> float | None:
     if model.startswith("ollama:"):
         return 180.0
     return None
 
 
-def default_max_tokens_for_model(model: str) -> Optional[int]:
+def default_max_tokens_for_model(model: str) -> int | None:
     if model.startswith("ollama:"):
         return 256
     if model.startswith("fake:"):
@@ -27,7 +26,7 @@ def default_max_tokens_for_model(model: str) -> Optional[int]:
     return 700
 
 
-def default_max_context_chars_for_model(model: str) -> Optional[int]:
+def default_max_context_chars_for_model(model: str) -> int | None:
     if model.startswith("ollama:"):
         return 3000
     return None
@@ -51,7 +50,7 @@ def build_grounded_prompt(
     retrieval: RetrievalResult,
     *,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-    max_context_chars: Optional[int] = None,
+    max_context_chars: int | None = None,
 ) -> str:
     context_blocks = []
     remaining_chars = max_context_chars
@@ -82,10 +81,10 @@ def answer(
     *,
     model: str = "fake:grounded",
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-    temperature: Optional[float] = 0.1,
-    max_tokens: Optional[int] = None,
-    timeout: Optional[float] = None,
-    max_context_chars: Optional[int] = None,
+    temperature: float | None = 0.1,
+    max_tokens: int | None = None,
+    timeout: float | None = None,
+    max_context_chars: int | None = None,
 ) -> AnswerResult:
     warnings: list[str] = []
     citations = [chunk.citation for chunk in retrieval.chunks]
@@ -123,7 +122,8 @@ def answer(
             max_context_chars=effective_max_context_chars,
         )
         effective_timeout = timeout if timeout is not None else default_timeout_for_model(model)
-        response = llm(model, temperature=temperature, max_tokens=effective_max_tokens, timeout=effective_timeout)(prompt)
+        llm_call = llm(model, temperature=temperature, max_tokens=effective_max_tokens, timeout=effective_timeout)
+        response = llm_call(prompt)
         text = response.text
         model_trace = dict(getattr(response, "trace", {}) or {})
 

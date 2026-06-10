@@ -1,4 +1,12 @@
-from .embedder import EmbeddedChunk, Embedder, HashEmbedder, OpenAIEmbedder, HuggingFaceEmbedder, embed_chunks, make_embedder
+from .embedder import (
+    EmbeddedChunk,
+    Embedder,
+    HashEmbedder,
+    HuggingFaceEmbedder,
+    OpenAIEmbedder,
+    embed_chunks,
+    make_embedder,
+)
 
 __all__ = [
     'EmbeddedChunk',

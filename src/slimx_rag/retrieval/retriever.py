@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from slimx_rag.embed import make_embedder
 from slimx_rag.index import make_index_backend
@@ -20,7 +20,7 @@ class RetrievedChunk:
     citation: str
 
     @classmethod
-    def from_search_result(cls, result: SearchResult) -> "RetrievedChunk":
+    def from_search_result(cls, result: SearchResult) -> RetrievedChunk:
         metadata = dict(result.metadata or {})
         source = (
             metadata.get("parent_kb_relpath")
@@ -60,8 +60,8 @@ def retrieve(
     index_path: Path,
     embed_settings: EmbedSettings,
     index_settings: IndexSettings,
-    state_path: Optional[Path] = None,
-    top_k: Optional[int] = None,
+    state_path: Path | None = None,
+    top_k: int | None = None,
 ) -> RetrievalResult:
     started = time.perf_counter()
     idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)

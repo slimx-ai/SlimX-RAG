@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,16 +25,11 @@ class IndexState:
     """
 
     version: int = 1
-    embed: Optional[dict] = None
-    docs: Dict[str, dict] = None
-
-    def __post_init__(self) -> None:
-        # Avoid the mutable-default pitfall: allocate a new dict per instance.
-        if self.docs is None:
-            self.docs = {}
+    embed: dict | None = None
+    docs: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: Path) -> "IndexState":
+    def load(cls, path: Path) -> IndexState:
         if not path.exists():
             return cls()
         data = json.loads(path.read_text(encoding="utf-8"))

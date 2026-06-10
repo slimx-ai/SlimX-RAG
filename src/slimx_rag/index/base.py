@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import EmbedSettings, IndexSettings
 
 from .types import IndexState, SearchResult
+
+
+def config_int(config: dict[str, object] | None, key: str, default: int) -> int:
+    """Read an integer from a backend_config dict, with a clear error for bad values."""
+    raw = (config or {}).get(key, default)
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        raise ValueError(f"backend_config[{key!r}] must be an integer, got {raw!r}")
+    try:
+        return int(raw)
+    except ValueError as e:
+        raise ValueError(f"backend_config[{key!r}] must be an integer, got {raw!r}") from e
 
 
 class IndexBackend(ABC):
@@ -21,22 +34,22 @@ class IndexBackend(ABC):
         self,
         index_path: Path,
         *,
-        settings: Optional[IndexSettings] = None,
-        state_path: Optional[Path] = None,
+        settings: IndexSettings | None = None,
+        state_path: Path | None = None,
     ) -> None:
         self.index_path = Path(index_path)
         self.settings = settings or IndexSettings()
         # Canonical state path: prefer explicit path; else place next to index output directory.
         self.state_path = Path(state_path) if state_path else (self.index_path.parent / self.settings.state_filename)
         self.state: IndexState = IndexState.load(self.state_path)
-        self._dim: Optional[int] = None
+        self._dim: int | None = None
 
     def __len__(self) -> int:
         """Optional: some backends can report number of chunks (best-effort)."""
         return 0
 
     @property
-    def dim(self) -> Optional[int]:
+    def dim(self) -> int | None:
         return self._dim
 
     @abstractmethod
@@ -56,7 +69,7 @@ class IndexBackend(ABC):
         """Delete chunks by chunk_id. Returns number of deleted chunks (best-effort)."""
 
     @abstractmethod
-    def query(self, query_vector: List[float], *, top_k: Optional[int] = None) -> List[SearchResult]:
+    def query(self, query_vector: list[float], *, top_k: int | None = None) -> list[SearchResult]:
         """Return top-k most similar chunks."""
 
     def set_embed_config(self, embed: EmbedSettings) -> None:
@@ -88,7 +101,7 @@ class IndexBackend(ABC):
         return {k: v for k, v in dict(md).items() if k in keep}
 
     @staticmethod
-    def _sort_results(results: Iterable[SearchResult], *, top_k: Optional[int] = None) -> List[SearchResult]:
+    def _sort_results(results: Iterable[SearchResult], *, top_k: int | None = None) -> list[SearchResult]:
         """Deterministically order results by score descending, then chunk_id ascending."""
         ordered = sorted(results, key=lambda r: (-float(r.score), str(r.chunk_id)))
         return ordered[:top_k] if top_k is not None else ordered
@@ -97,7 +110,7 @@ class IndexBackend(ABC):
         if self.settings.write_state:
             self.state.save(self.state_path)
 
-    def apply_incremental_plan(self, *, current_docs: Dict[str, Tuple[str, List[str]]]) -> int:
+    def apply_incremental_plan(self, *, current_docs: dict[str, tuple[str, list[str]]]) -> int:
         """Delete stale chunks based on doc_id/content_hash comparison.
 
         current_docs: doc_id -> (content_hash, [chunk_ids])
@@ -116,7 +129,7 @@ class IndexBackend(ABC):
         # Changed docs: content_hash differs
         for doc_id in current_doc_ids:
             new_hash, new_chunk_ids = current_docs[doc_id]
-            old = self.state.docs.get(doc_id)
+            old = self.state.docs.get(doc_id) or {}
             if old and str(old.get("content_hash")) != str(new_hash):
                 deleted += self.delete(old.get("chunk_ids", []) or [])
 

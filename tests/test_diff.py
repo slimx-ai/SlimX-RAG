@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from slimx_rag.cli import main
-from slimx_rag.diff import build_diff, format_diff_text
+from slimx_rag.diff import build_diff
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -13,7 +13,10 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
 
 
 def _doc(doc_id: str, content_hash: str, relpath: str) -> dict:
-    return {"page_content": relpath, "metadata": {"doc_id": doc_id, "content_hash": content_hash, "kb_relpath": relpath}}
+    return {
+        "page_content": relpath,
+        "metadata": {"doc_id": doc_id, "content_hash": content_hash, "kb_relpath": relpath},
+    }
 
 
 def _chunk(chunk_id: str, doc_id: str) -> dict:
@@ -23,8 +26,14 @@ def _chunk(chunk_id: str, doc_id: str) -> dict:
 def test_diff_detects_added_deleted_changed_documents_and_chunks(tmp_path: Path) -> None:
     old = tmp_path / "old"
     new = tmp_path / "new"
-    _write_jsonl(old / "docs.jsonl", [_doc("same", "h1", "same.md"), _doc("deleted", "hd", "deleted.md"), _doc("changed", "old", "changed.md")])
-    _write_jsonl(new / "docs.jsonl", [_doc("same", "h1", "same.md"), _doc("added", "ha", "added.md"), _doc("changed", "new", "changed.md")])
+    _write_jsonl(
+        old / "docs.jsonl",
+        [_doc("same", "h1", "same.md"), _doc("deleted", "hd", "deleted.md"), _doc("changed", "old", "changed.md")],
+    )
+    _write_jsonl(
+        new / "docs.jsonl",
+        [_doc("same", "h1", "same.md"), _doc("added", "ha", "added.md"), _doc("changed", "new", "changed.md")],
+    )
     _write_jsonl(old / "chunks.jsonl", [_chunk("c-same", "same"), _chunk("c-deleted", "deleted")])
     _write_jsonl(new / "chunks.jsonl", [_chunk("c-same", "same"), _chunk("c-added", "added")])
 
@@ -47,7 +56,14 @@ def test_diff_uses_manifest_for_config_changes(tmp_path: Path) -> None:
     _write_jsonl(new / "docs.jsonl", [])
     _write_jsonl(old / "chunks.jsonl", [])
     _write_jsonl(new / "chunks.jsonl", [])
-    base = {"chunk_config": {"chunk_size": 800}, "embed_provider": "hash", "embed_model": "m", "embed_dim": 384, "index_backend": "local", "hash_policy": {"algorithm": "blake2b"}}
+    base = {
+        "chunk_config": {"chunk_size": 800},
+        "embed_provider": "hash",
+        "embed_model": "m",
+        "embed_dim": 384,
+        "index_backend": "local",
+        "hash_policy": {"algorithm": "blake2b"},
+    }
     old.mkdir(exist_ok=True)
     new.mkdir(exist_ok=True)
     (old / "manifest.json").write_text(json.dumps(base), encoding="utf-8")

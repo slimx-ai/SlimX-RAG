@@ -1,15 +1,13 @@
-import unicodedata
-from typing import Optional
-from pathlib import Path
 import json
+import unicodedata
+from collections.abc import Iterable, Iterator
+from pathlib import Path
+from typing import Any
+
 from langchain_core.documents import Document
-from typing import Any, Iterable, Iterator
-
-from slimx_rag.core.hashing import _content_hash, _hash_path, _hash_text
 
 
-
-def _normalize_text(text: str, *, max_chars: Optional[int], normalize: bool) -> str:
+def _normalize_text(text: str, *, max_chars: int | None, normalize: bool) -> str:
     t = text or ""
     if normalize:
         # NFC helps stabilize unicode forms

@@ -19,7 +19,13 @@ def _chunk(text: str, chunk_id: str, **metadata) -> dict:
 
 
 def test_report_json_stats_duplicates_empty_and_coverage(tmp_path: Path) -> None:
-    _write_jsonl(tmp_path / "docs.jsonl", [{"page_content": "abcdef", "metadata": {"doc_id": "d1", "kb_relpath": "doc.md", "content_len": 6, "doc_type": "docs"}}])
+    _write_jsonl(
+        tmp_path / "docs.jsonl",
+        [{
+            "page_content": "abcdef",
+            "metadata": {"doc_id": "d1", "kb_relpath": "doc.md", "content_len": 6, "doc_type": "docs"},
+        }],
+    )
     _write_jsonl(
         tmp_path / "chunks.jsonl",
         [

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Sequence, Tuple
+from collections.abc import Iterable, Sequence
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from slimx_rag.core.hashing import (
     chunk_config_fingerprint,
-    content_hash as compute_content_hash,
     make_chunk_id,
 )
+from slimx_rag.core.hashing import (
+    content_hash as compute_content_hash,
+)
 
-def _stable_doc_sort_key(doc: Document) -> Tuple[str, str]:
+
+def _stable_doc_sort_key(doc: Document) -> tuple[str, str]:
     """
     Build a deterministic sort key for documents.
 
@@ -68,7 +71,7 @@ def chunk_documents(
     separators: Sequence[str] = ("\n\n", "\n", " ", ""),
     extended_chunk_metadata: bool = True,
     include_chunk_cfg_hash: bool = False,
-) -> List[Document]:
+) -> list[Document]:
     """
     Split Documents into deterministic chunks for embedding/retrieval.
 
@@ -105,7 +108,7 @@ def chunk_documents(
         separators=separators,
     )
 
-    out: List[Document] = []
+    out: list[Document] = []
     for doc in docs_list:
         parent_doc_id = str(doc.metadata.get("doc_id", ""))
         parent_kb_relpath = str(doc.metadata.get("kb_relpath", ""))

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, List, Optional
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import IndexSettings
-from .base import IndexBackend
-from .types import SearchResult, IndexState
+
+from .base import IndexBackend, config_int
+from .types import IndexState, SearchResult
 
 
 class QdrantIndexBackend(IndexBackend):
     """Qdrant backend plugin."""
 
-    def __init__(self, index_path: Path, *, settings: Optional[IndexSettings] = None, state_path: Optional[Path] = None):
+    def __init__(self, index_path: Path, *, settings: IndexSettings | None = None, state_path: Path | None = None):
         super().__init__(index_path, settings=settings, state_path=state_path)
         cfg = self.settings.backend_config or {}
         self.collection = str(cfg.get("collection") or "").strip()
@@ -23,7 +24,9 @@ class QdrantIndexBackend(IndexBackend):
             from qdrant_client import QdrantClient  # type: ignore
             from qdrant_client.http import models as qm  # type: ignore
         except ImportError as e:
-            raise ImportError("Qdrant backend requires optional dependency. Install with: uv sync --extra qdrant") from e
+            raise ImportError(
+                "Qdrant backend requires optional dependency. Install with: uv sync --extra qdrant"
+            ) from e
 
         self._qm = qm
         url = str(cfg.get("url") or "http://localhost:6333")
@@ -32,10 +35,10 @@ class QdrantIndexBackend(IndexBackend):
         self.state = IndexState.load(self.state_path)
 
     def _configured_dim(self) -> int:
-        return int((self.settings.backend_config or {}).get("dim", 0) or 0)
+        return config_int(self.settings.backend_config, "dim", 0)
 
     @staticmethod
-    def _collection_dim(info: object) -> Optional[int]:
+    def _collection_dim(info: object) -> int | None:
         try:
             return int(info.config.params.vectors.size)  # type: ignore[attr-defined]
         except Exception:
@@ -122,14 +125,24 @@ class QdrantIndexBackend(IndexBackend):
             self.client.upsert(collection_name=self.collection, points=points)
         return written
 
-    def query(self, query_vector: List[float], *, top_k: Optional[int] = None) -> List[SearchResult]:
+    def query(self, query_vector: list[float], *, top_k: int | None = None) -> list[SearchResult]:
         if self._dim is not None and len(query_vector) != int(self._dim):
             raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {self._dim}")
         k = int(top_k or self.settings.top_k)
         candidate_k = max(k, k * 4)
-        res = self.client.search(collection_name=self.collection, query_vector=list(map(float, query_vector)), limit=candidate_k, with_payload=True)
-        out: List[SearchResult] = []
+        res = self.client.search(
+            collection_name=self.collection,
+            query_vector=list(map(float, query_vector)),
+            limit=candidate_k,
+            with_payload=True,
+        )
+        out: list[SearchResult] = []
         for p in res:
             payload = p.payload or {}
-            out.append(SearchResult(chunk_id=str(p.id), score=float(p.score), text=str(payload.get("text") or ""), metadata=dict(payload.get("metadata") or {})))
+            out.append(SearchResult(
+                chunk_id=str(p.id),
+                score=float(p.score),
+                text=str(payload.get("text") or ""),
+                metadata=dict(payload.get("metadata") or {}),
+            ))
         return self._sort_results(out, top_k=k)

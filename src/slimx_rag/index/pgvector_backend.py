@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, List, Optional
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import IndexSettings
 
-from .base import IndexBackend
-from .types import SearchResult, IndexState
+from .base import IndexBackend, config_int
+from .types import IndexState, SearchResult
 
 
-def _vector_literal(vec: List[float]) -> str:
+def _vector_literal(vec: list[float]) -> str:
     # pgvector input format: '[1,2,3]'
     return "[" + ",".join(f"{float(x):.8g}" for x in vec) + "]"
 
@@ -27,7 +27,7 @@ class PgVectorIndexBackend(IndexBackend):
       - dim: int (optional explicit storage constraint)
     """
 
-    def __init__(self, index_path: Path, *, settings: Optional[IndexSettings] = None, state_path: Optional[Path] = None):
+    def __init__(self, index_path: Path, *, settings: IndexSettings | None = None, state_path: Path | None = None):
         super().__init__(index_path, settings=settings, state_path=state_path)
         cfg = self.settings.backend_config or {}
         self.dsn = str(cfg.get("dsn") or "").strip()
@@ -56,7 +56,7 @@ class PgVectorIndexBackend(IndexBackend):
         return f"{self.schema}.{self.table}"
 
     def _configured_dim(self) -> int:
-        return int((self.settings.backend_config or {}).get("dim", 0) or 0)
+        return config_int(self.settings.backend_config, "dim", 0)
 
     def _ensure_table(self, dim: int) -> None:
         if dim <= 0:
@@ -121,7 +121,8 @@ class PgVectorIndexBackend(IndexBackend):
             if actual_dim != int(self._dim or expected_dim):
                 raise RuntimeError(f"Vector dim mismatch: expected {self._dim or expected_dim}, got {actual_dim}")
 
-            rows.append((str(it.chunk_id), _vector_literal(vector), it.text, self._apply_metadata_whitelist(dict(it.metadata))))
+            md = self._apply_metadata_whitelist(dict(it.metadata))
+            rows.append((str(it.chunk_id), _vector_literal(vector), it.text, md))
 
         if not rows:
             return 0
@@ -143,7 +144,8 @@ class PgVectorIndexBackend(IndexBackend):
                         INSERT INTO {self._fqtn} (chunk_id, embedding, text, metadata)
                         VALUES (%s, %s::vector, %s, %s)
                         ON CONFLICT (chunk_id)
-                        DO UPDATE SET embedding = EXCLUDED.embedding, text = EXCLUDED.text, metadata = EXCLUDED.metadata;
+                        DO UPDATE SET embedding = EXCLUDED.embedding, text = EXCLUDED.text,
+                                      metadata = EXCLUDED.metadata;
                         """,
                         rows,
                     )
@@ -152,7 +154,7 @@ class PgVectorIndexBackend(IndexBackend):
 
         return int(written)
 
-    def query(self, query_vector: List[float], *, top_k: Optional[int] = None) -> List[SearchResult]:
+    def query(self, query_vector: list[float], *, top_k: int | None = None) -> list[SearchResult]:
         dim = self._dim or self._configured_dim()
         if dim <= 0:
             return []
@@ -180,7 +182,7 @@ class PgVectorIndexBackend(IndexBackend):
                 )
                 rows = cur.fetchall() or []
 
-        out: List[SearchResult] = []
+        out: list[SearchResult] = []
         for chunk_id, text, metadata, score in rows:
             out.append(
                 SearchResult(

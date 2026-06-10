@@ -3,12 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from slimx_rag.answer import answer
+from slimx_rag.cli import main
 from slimx_rag.eval import run_eval
+from slimx_rag.retrieval import RetrievalResult, retrieve
 from slimx_rag.retrieve import RetrievalResult as CompatRetrievalResult
 from slimx_rag.retrieve import retrieve as compat_retrieve
-from slimx_rag.retrieval import RetrievalResult, retrieve
-
-from slimx_rag.cli import main
 
 
 def test_retrieval_package_preserves_legacy_imports():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from langchain_core.documents import Document
 
 from slimx_rag.chunk import chunk_documents
@@ -59,22 +60,13 @@ def test_chunk_validates_parameters():
     doc = Document(page_content="x" * 1000, metadata={"kb_relpath": "x.md", "doc_id": "x"})
 
     # overlap >= size
-    try:
+    with pytest.raises(ValueError):
         chunk_documents([doc], chunk_size=100, chunk_overlap=100)
-        assert False, "Expected ValueError"
-    except ValueError:
-        pass
 
     # size <= 0
-    try:
+    with pytest.raises(ValueError):
         chunk_documents([doc], chunk_size=0, chunk_overlap=0)
-        assert False, "Expected ValueError"
-    except ValueError:
-        pass
 
     # overlap < 0
-    try:
+    with pytest.raises(ValueError):
         chunk_documents([doc], chunk_size=100, chunk_overlap=-1)
-        assert False, "Expected ValueError"
-    except ValueError:
-        pass

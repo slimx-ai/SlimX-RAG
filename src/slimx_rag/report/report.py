@@ -92,7 +92,9 @@ def _chunk_stats(lengths: list[int]) -> dict[str, Any]:
     }
 
 
-def _top_records(records: list[dict[str, Any]], *, key_fn, limit: int = 5, reverse: bool = True) -> list[dict[str, Any]]:
+def _top_records(
+    records: list[dict[str, Any]], *, key_fn, limit: int = 5, reverse: bool = True
+) -> list[dict[str, Any]]:
     return sorted(records, key=key_fn, reverse=reverse)[:limit]
 
 
@@ -159,7 +161,9 @@ def build_report(out_dir: Path) -> dict[str, Any]:
     if manifest:
         for key in ("doc_count", "chunk_count", "embedding_count", "index_item_count"):
             if manifest.get(key) is not None and manifest.get(key) != summary[key]:
-                warnings.append(f"Manifest count mismatch for {key}: manifest={manifest.get(key)} actual={summary[key]}")
+                warnings.append(
+                    f"Manifest count mismatch for {key}: manifest={manifest.get(key)} actual={summary[key]}"
+                )
 
     largest_documents = [
         {
@@ -186,7 +190,12 @@ def build_report(out_dir: Path) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "summary": summary,
         "document_inventory": [
-            {"doc_id": str(_metadata(d).get("doc_id") or ""), "kb_relpath": _relpath(d), "content_len": int(_metadata(d).get("content_len") or len(_text(d))), "doc_type": _doc_type(d)}
+            {
+                "doc_id": str(_metadata(d).get("doc_id") or ""),
+                "kb_relpath": _relpath(d),
+                "content_len": int(_metadata(d).get("content_len") or len(_text(d))),
+                "doc_type": _doc_type(d),
+            }
             for d in docs
         ],
         "chunk_stats": _chunk_stats(chunk_lengths),
@@ -196,7 +205,15 @@ def build_report(out_dir: Path) -> dict[str, Any]:
         "duplicates": {"duplicate_chunk_ids": duplicate_chunk_ids, "duplicate_chunk_texts": duplicate_text_groups},
         "metadata_coverage": _coverage(chunks),
         "config": {
-            "embedding": (manifest and {"provider": manifest.get("embed_provider"), "model": manifest.get("embed_model"), "dim": manifest.get("embed_dim")}) or (index_state or {}).get("embed", {}),
+            "embedding": (
+                manifest
+                and {
+                    "provider": manifest.get("embed_provider"),
+                    "model": manifest.get("embed_model"),
+                    "dim": manifest.get("embed_dim"),
+                }
+            )
+            or (index_state or {}).get("embed", {}),
             "backend": {"index_backend": (manifest or {}).get("index_backend", "unknown")},
             "hash_policy": (manifest or {}).get("hash_policy", {}),
         },

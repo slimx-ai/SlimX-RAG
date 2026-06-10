@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import EmbedSettings, IndexSettings
 
@@ -30,7 +32,7 @@ class FakePointIdsList:
 
 
 class FakeQdrantClient:
-    instances: list["FakeQdrantClient"] = []
+    instances: list[FakeQdrantClient] = []
 
     def __init__(self, *, url: str, api_key=None, prefer_grpc: bool = False):
         self.url = url
@@ -79,7 +81,7 @@ class FakeQdrantClient:
         store = self.points.get(collection_name, {})
         out = []
         for p in store.values():
-            score = sum(a * b for a, b in zip(query_vector, p.vector))
+            score = sum(a * b for a, b in zip(query_vector, p.vector, strict=False))
             out.append(types.SimpleNamespace(id=p.id, score=score, payload=p.payload))
         # Intentionally reverse tie order to prove backend code applies chunk_id ascending.
         out.sort(key=lambda p: (p.score, p.id), reverse=True)
@@ -147,13 +149,10 @@ def test_qdrant_configured_dim_is_enforced_on_first_upsert(monkeypatch, tmp_path
     assert idx.dim == 2
     assert client.collections == {"slimx": 2}
 
-    try:
+    with pytest.raises(RuntimeError, match="Vector dim mismatch"):
         idx.upsert([
             EmbeddedChunk(chunk_id="bad", vector=[1.0, 0.0, 0.0], text="bad", metadata={}),
         ])
-        assert False, "expected dimension mismatch"
-    except RuntimeError as e:
-        assert "Vector dim mismatch" in str(e)
 
 
 def test_qdrant_applies_metadata_whitelist(monkeypatch, tmp_path):

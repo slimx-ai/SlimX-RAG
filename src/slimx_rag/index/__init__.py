@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 from slimx_rag.settings import IndexSettings
 
 from .base import IndexBackend
-from .types import SearchResult, IndexState
+from .types import IndexState, SearchResult
 
 
 def make_index_backend(
     index_path: Path,
     *,
-    settings: Optional[IndexSettings] = None,
-    state_path: Optional[Path] = None,
+    settings: IndexSettings | None = None,
+    state_path: Path | None = None,
 ) -> IndexBackend:
     """Factory for index backends (plugin architecture).
 
@@ -25,7 +24,7 @@ def make_index_backend(
     """
     # TODO: using registry pattern would be cleaner, but this is straightforward enough for now
     st = settings or IndexSettings()
-    backend = (st.backend or IndexSettings.backend).lower().strip()
+    backend = (st.backend or "local").lower().strip()
 
     if backend == "local":
         from .local import LocalJsonlIndexBackend

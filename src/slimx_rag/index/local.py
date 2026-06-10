@@ -4,27 +4,27 @@ import json
 import math
 import os
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import IndexSettings
 
 from .base import IndexBackend
-from .types import SearchResult, IndexState
+from .types import IndexState, SearchResult
 
 
-def _cosine(query_vec: List[float], query_norm: float, vec: List[float], vec_norm: float) -> float:
+def _cosine(query_vec: list[float], query_norm: float, vec: list[float], vec_norm: float) -> float:
     if query_norm <= 0.0 or vec_norm <= 0.0:
         return 0.0
     dot = 0.0
     # assume same length validated upstream
-    for a, b in zip(query_vec, vec):
+    for a, b in zip(query_vec, vec, strict=False):
         dot += float(a) * float(b)
     return dot / (query_norm * vec_norm)
 
 
-def _norm(vec: List[float]) -> float:
+def _norm(vec: list[float]) -> float:
     s = 0.0
     for x in vec:
         s += float(x) * float(x)
@@ -45,11 +45,11 @@ class LocalJsonlIndexBackend(IndexBackend):
         self,
         index_path: Path,
         *,
-        settings: Optional[IndexSettings] = None,
-        state_path: Optional[Path] = None,
+        settings: IndexSettings | None = None,
+        state_path: Path | None = None,
     ):
         super().__init__(index_path, settings=settings, state_path=state_path)
-        self._items: Dict[str, Tuple[List[float], float, str, dict[str, object]]] = {}
+        self._items: dict[str, tuple[list[float], float, str, dict[str, object]]] = {}
         # Override state load to use the shared IndexState type (for clarity)
         self.state = IndexState.load(self.state_path)
 
@@ -137,13 +137,13 @@ class LocalJsonlIndexBackend(IndexBackend):
             written += 1
         return written
 
-    def query(self, query_vector: List[float], *, top_k: Optional[int] = None) -> List[SearchResult]:
+    def query(self, query_vector: list[float], *, top_k: int | None = None) -> list[SearchResult]:
         if self._dim is not None and len(query_vector) != self._dim:
             raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {self._dim}")
 
         k = int(top_k or self.settings.top_k)
         qn = _norm(query_vector)
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
         for cid, (vec, vn, text, md) in self._items.items():
             score = _cosine(query_vector, qn, vec, vn)
             results.append(SearchResult(chunk_id=cid, score=float(score), text=text, metadata=md))

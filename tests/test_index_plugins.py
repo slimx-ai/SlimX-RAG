@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from slimx_rag.index import make_index_backend
 from slimx_rag.embed import EmbeddedChunk
+from slimx_rag.index import make_index_backend
 from slimx_rag.settings import EmbedSettings, IndexSettings
 
 

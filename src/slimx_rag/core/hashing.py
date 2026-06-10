@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import hashlib
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 
 
 @dataclass(frozen=True, slots=True)

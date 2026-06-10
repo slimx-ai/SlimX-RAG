@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, List, Optional
 
 from langchain_core.documents import Document
 
-from slimx_rag.settings import IndexingPipelineSettings
 from slimx_rag.core.hashing import content_hash, fallback_doc_id, path_id
+from slimx_rag.settings import IndexingPipelineSettings
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def _fallback_doc_id(source: str, content_hash_value: str) -> str:
     return fallback_doc_id(source, content_hash_value)
 
 
-def fetch_documents(settings: IndexingPipelineSettings) -> List[Document]:
+def fetch_documents(settings: IndexingPipelineSettings) -> list[Document]:
     """
     Load documents from knowledge-base (subfolders) and attach stable metadata.
 
@@ -83,7 +83,7 @@ def fetch_documents(settings: IndexingPipelineSettings) -> List[Document]:
 
     kb_dir = settings.kb_dir
     glob = settings.ingest.glob
-    documents: List[Document] = []
+    documents: list[Document] = []
     logger.info(f"Loading documents from knowledge base at: {kb_dir}")
 
     paths = sorted(p for p in kb_dir.glob(glob) if p.is_file())
@@ -105,7 +105,7 @@ def fetch_documents(settings: IndexingPipelineSettings) -> List[Document]:
             ),
         }
         if not metadata["doc_id"]:
-            metadata["doc_id"] = _fallback_doc_id(str(source_path), metadata["content_hash"])
+            metadata["doc_id"] = _fallback_doc_id(str(source_path), str(metadata["content_hash"]))
         documents.append(Document(page_content=text, metadata=metadata))
 
     logger.info(f"Fetched {len(documents)} documents from knowledge base.")

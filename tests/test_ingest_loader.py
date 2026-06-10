@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 import pytest
 
 from slimx_rag.ingest.loader import fetch_documents

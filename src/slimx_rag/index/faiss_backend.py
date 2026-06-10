@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import IndexSettings
 
-from .base import IndexBackend
-from .types import SearchResult, IndexState
+from .base import IndexBackend, config_int
+from .types import IndexState, SearchResult
 
 
 def _l2_normalize(arr: np.ndarray) -> np.ndarray:
@@ -29,7 +30,7 @@ class FaissIndexBackend(IndexBackend):
       - Supports delete via IndexIDMap2.remove_ids (works for this index type).
     """
 
-    def __init__(self, index_path: Path, *, settings: Optional[IndexSettings] = None, state_path: Optional[Path] = None):
+    def __init__(self, index_path: Path, *, settings: IndexSettings | None = None, state_path: Path | None = None):
         super().__init__(index_path, settings=settings, state_path=state_path)
         try:
             import faiss  # type: ignore
@@ -39,10 +40,10 @@ class FaissIndexBackend(IndexBackend):
             ) from e
 
         self._faiss = faiss  # module
-        self._index = None  # faiss index
-        self._chunk_to_id: Dict[str, int] = {}
-        self._id_to_chunk: Dict[int, str] = {}
-        self._payload: Dict[str, Tuple[str, dict[str, object]]] = {}
+        self._index: Any = None  # faiss index
+        self._chunk_to_id: dict[str, int] = {}
+        self._id_to_chunk: dict[int, str] = {}
+        self._payload: dict[str, tuple[str, dict[str, object]]] = {}
         self._next_id: int = 1
 
         # reload state using shared type
@@ -68,7 +69,7 @@ class FaissIndexBackend(IndexBackend):
                 pass
         else:
             # create empty only if backend_config['dim'] explicitly constrains storage
-            dim = int(self.settings.backend_config.get("dim", 0) or 0)
+            dim = config_int(self.settings.backend_config, "dim", 0)
             if dim <= 0:
                 # Defer creation until first upsert vector
                 self._index = None
@@ -86,7 +87,10 @@ class FaissIndexBackend(IndexBackend):
             self._next_id = int(data.get("next_id", 1))
             self._chunk_to_id = {str(k): int(v) for k, v in (data.get("chunk_to_id") or {}).items()}
             self._id_to_chunk = {int(k): str(v) for k, v in (data.get("id_to_chunk") or {}).items()}
-            self._payload = {str(k): (v.get("text", "") or "", dict(v.get("metadata") or {})) for k, v in (data.get("payload") or {}).items()}
+            self._payload = {
+                str(k): (v.get("text", "") or "", dict(v.get("metadata") or {}))
+                for k, v in (data.get("payload") or {}).items()
+            }
 
         # Reload state
         self.state = IndexState.load(self.state_path)
@@ -123,7 +127,7 @@ class FaissIndexBackend(IndexBackend):
         if self._index is None:
             return 0
 
-        ids: List[int] = []
+        ids: list[int] = []
         for cid in chunk_ids:
             i = self._chunk_to_id.get(cid)
             if i is None:
@@ -138,11 +142,12 @@ class FaissIndexBackend(IndexBackend):
 
         deleted = 0
         for i in ids:
-            cid = self._id_to_chunk.pop(int(i), None)
-            if cid is None:
+            removed_cid = self._id_to_chunk.get(int(i))
+            if removed_cid is None:
                 continue
-            self._chunk_to_id.pop(cid, None)
-            self._payload.pop(cid, None)
+            del self._id_to_chunk[int(i)]
+            self._chunk_to_id.pop(removed_cid, None)
+            self._payload.pop(removed_cid, None)
             deleted += 1
         return deleted
 
@@ -185,7 +190,7 @@ class FaissIndexBackend(IndexBackend):
 
         return written
 
-    def query(self, query_vector: List[float], *, top_k: Optional[int] = None) -> List[SearchResult]:
+    def query(self, query_vector: list[float], *, top_k: int | None = None) -> list[SearchResult]:
         if self._index is None or self._dim is None:
             return []
 
@@ -200,9 +205,9 @@ class FaissIndexBackend(IndexBackend):
         # arbitrary order.
         candidate_k = max(k, min(len(self._payload), k * 4))
         scores, ids = self._index.search(q, candidate_k)
-        results: List[SearchResult] = []
+        results: list[SearchResult] = []
 
-        for score, fid in zip(scores[0].tolist(), ids[0].tolist()):
+        for score, fid in zip(scores[0].tolist(), ids[0].tolist(), strict=False):
             if fid == -1:
                 continue
             cid = self._id_to_chunk.get(int(fid))

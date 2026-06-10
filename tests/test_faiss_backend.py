@@ -21,7 +21,7 @@ class FakeIndexIDMap2:
         self.rows: dict[int, np.ndarray] = {}
 
     def add_with_ids(self, vectors, ids):
-        for vec, fid in zip(vectors, ids):
+        for vec, fid in zip(vectors, ids, strict=False):
             self.rows[int(fid)] = np.array(vec, dtype="float32")
             self.ntotal += 1
 

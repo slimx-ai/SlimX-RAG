@@ -20,7 +20,10 @@ def _backend_config() -> dict[str, object]:
     if raw:
         return json.loads(raw)
     if os.getenv("RAG_INDEX_BACKEND", "local") == "qdrant":
-        return {"url": os.getenv("QDRANT_URL", "http://qdrant:6333"), "collection": os.getenv("QDRANT_COLLECTION", "slimx_demo")}
+        return {
+            "url": os.getenv("QDRANT_URL", "http://qdrant:6333"),
+            "collection": os.getenv("QDRANT_COLLECTION", "slimx_demo"),
+        }
     return {}
 
 
@@ -141,10 +144,11 @@ def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(de
         index_settings=_index_settings(),
         top_k=payload.top_k,
     )
+    model: str = payload.model or os.getenv("SLIMX_LLM_MODEL") or "fake:grounded"
     result = answer(
         payload.question,
         retrieval,
-        model=payload.model or os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
+        model=model,
         timeout=_llm_timeout(),
         max_tokens=_llm_max_tokens(),
         max_context_chars=_max_context_chars(),
@@ -156,13 +160,14 @@ def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(de
 def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
     cases = load_eval_cases(Path(payload.dataset))
+    model: str = payload.model or os.getenv("SLIMX_LLM_MODEL") or "fake:grounded"
     report = run_eval(
         cases,
         index_path=_index_path(),
         state_path=_state_path(),
         embed_settings=_embed_settings(),
         index_settings=_index_settings(),
-        model=payload.model or os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
+        model=model,
         top_k=payload.top_k or _index_settings().top_k,
         timeout=_llm_timeout(),
         max_tokens=_llm_max_tokens(),

@@ -11,7 +11,7 @@ jobs:
 
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - name: Checkout
@@ -29,11 +29,20 @@ jobs:
 
       - name: Install deps
         run: |
-          uv sync --extra dev
+          uv sync --group dev
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+
+      - name: Type check
+        if: matrix.python-version == '3.12'
+        run: |
+          uv run mypy
 
       - name: Run tests
         run: |
-          uv run pytest -q
+          uv run pytest -q --cov=slimx_rag --cov-report=term-missing
 
       - name: Build package
         run: |

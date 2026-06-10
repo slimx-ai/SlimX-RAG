@@ -3,12 +3,14 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import EmbedSettings, IndexSettings
 
 
 class FakeCursor:
-    def __init__(self, conn: "FakeConnection"):
+    def __init__(self, conn: FakeConnection):
         self.conn = conn
         self.rowcount = 0
         self._rows = []
@@ -143,13 +145,10 @@ def test_pgvector_configured_dim_is_enforced_on_first_upsert(monkeypatch, tmp_pa
     assert idx.dim == 2
     assert "embedding vector(2)" in all_sql()
 
-    try:
+    with pytest.raises(RuntimeError, match="Vector dim mismatch"):
         idx.upsert([
             EmbeddedChunk(chunk_id="bad", vector=[1.0, 0.0, 0.0], text="bad", metadata={}),
         ])
-        assert False, "expected dimension mismatch"
-    except RuntimeError as e:
-        assert "Vector dim mismatch" in str(e)
 
 
 def test_pgvector_applies_metadata_whitelist(monkeypatch, tmp_path):

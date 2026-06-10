@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Optional
 
 from langchain_core.documents import Document
 
@@ -15,14 +15,14 @@ from slimx_rag.utils.commons import _normalize_text
 @dataclass(frozen=True, slots=True)
 class EmbeddedChunk:
     chunk_id: str
-    vector: List[float]
+    vector: list[float]
     text: str
     metadata: dict[str, object]
 
 
 class Embedder(ABC):
     @abstractmethod
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts into vectors."""
 
 
@@ -38,10 +38,10 @@ class HashEmbedder(Embedder):
             raise ValueError("dim must be > 0")
         self.dim = dim
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        out: List[List[float]] = []
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
         for t in texts:
-            vec: List[float] = []
+            vec: list[float] = []
             seed = (t or "").encode("utf-8", errors="ignore")
             counter = 0
             while len(vec) < self.dim:
@@ -72,7 +72,7 @@ class OpenAIEmbedder(Embedder):
             ) from e
         self._emb = OpenAIEmbeddings(model=model)
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         return self._emb.embed_documents(texts)
 
 
@@ -89,7 +89,7 @@ class HuggingFaceEmbedder(Embedder):
             ) from e
         self._model = SentenceTransformer(model)
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         # returns numpy array; convert to list of lists
         embs = self._model.encode(texts, normalize_embeddings=False, show_progress_bar=False)
         return [list(map(float, row)) for row in embs]
@@ -106,14 +106,14 @@ def make_embedder(settings: EmbedSettings) -> Embedder:
 
 
 def _validate_vectors(
-    vectors: List[List[float]],
+    vectors: list[list[float]],
     *,
-    expected_dim: Optional[int],
+    expected_dim: int | None,
     count: int,
 ) -> None:
     if len(vectors) != count:
         raise RuntimeError(f"Embedding provider returned {len(vectors)} vectors for {count} texts")
-    dim0: Optional[int] = None
+    dim0: int | None = None
     for v in vectors:
         if dim0 is None:
             dim0 = len(v)
@@ -127,7 +127,7 @@ def embed_chunks(
     chunks: Iterable[Document],
     *,
     settings: EmbedSettings,
-    batch_size: Optional[int] = None,
+    batch_size: int | None = None,
 ) -> Iterator[EmbeddedChunk]:
     """Embed chunk Documents into vectors.
 
@@ -142,8 +142,8 @@ def embed_chunks(
     embedder = make_embedder(settings)
     bs = batch_size or settings.batch_size
 
-    batch_docs: List[Document] = []
-    batch_texts: List[str] = []
+    batch_docs: list[Document] = []
+    batch_texts: list[str] = []
 
     def flush() -> Iterator[EmbeddedChunk]:
         """Embed the currently buffered batch and yield EmbeddedChunk records."""
@@ -159,7 +159,7 @@ def embed_chunks(
         ]
 
         try:
-            last_err: Optional[Exception] = None
+            last_err: Exception | None = None
 
             for attempt in range(settings.retries):
                 try:
@@ -171,7 +171,7 @@ def embed_chunks(
                         count=len(texts),
                     )
 
-                    for d, v, t_in in zip(batch_docs, vectors, texts):
+                    for d, v, t_in in zip(batch_docs, vectors, texts, strict=True):
                         md = dict(d.metadata)
                         cid = str(md.get("chunk_id") or "")
                         if not cid:

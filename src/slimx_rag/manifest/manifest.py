@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from slimx_rag.core.hashing import DEFAULT_HASH_POLICY
-from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexSettings, IndexingPipelineSettings
+from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexingPipelineSettings
 
 SCHEMA_VERSION = "manifest-v1"
 MANIFEST_FILENAME = "manifest.json"
