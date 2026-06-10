@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from slimx_rag.cli import main
+from slimx_rag.server.app import app
+
+
+@pytest.fixture(scope="module")
+def built_index(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build a tiny local index once for all server tests."""
+    base = tmp_path_factory.mktemp("server_kb")
+    kb = base / "kb"
+    out = base / "out"
+    kb.mkdir()
+    (kb / "overview.md").write_text(
+        "SlimX builds explicit inspectable research AI systems.", encoding="utf-8"
+    )
+    assert main(["run", "--kb-dir", str(kb), "--out-dir", str(out), "--embed-dim", "16"]) == 0
+    return out
+
+
+@pytest.fixture
+def client(built_index: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    monkeypatch.setenv("RAG_INDEX_PATH", str(built_index / "index.jsonl"))
+    monkeypatch.setenv("RAG_STATE_PATH", str(built_index / "index_state.json"))
+    monkeypatch.setenv("RAG_EMBED_DIM", "16")
+    monkeypatch.delenv("DEMO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("RAG_BACKEND_CONFIG", raising=False)
+    return TestClient(app)
+
+
+def test_health_returns_config_summary(client: TestClient) -> None:
+    res = client.get("/health")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "ok"
+    assert body["index_backend"] == "local"
+    assert body["embed_provider"] == "hash"
+
+
+def test_config_endpoint(client: TestClient) -> None:
+    res = client.get("/api/config")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["index"]["backend"] == "local"
+    assert body["embed"]["provider"] == "hash"
+
+
+def test_retrieve_returns_citations(client: TestClient) -> None:
+    res = client.post("/api/retrieve", json={"question": "What does SlimX build?", "top_k": 1})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["chunks"]
+    assert body["chunks"][0]["citation"]
+
+
+def test_ask_returns_grounded_answer(client: TestClient) -> None:
+    res = client.post("/api/ask", json={"question": "What does SlimX build?", "top_k": 1})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["citations"]
+    assert body["answer"]
+    assert body["model_trace"]["provider"] == "fake"
+
+
+def test_invalid_top_k_is_rejected_with_422(client: TestClient) -> None:
+    for top_k in (0, -1):
+        res = client.post("/api/retrieve", json={"question": "x", "top_k": top_k})
+        assert res.status_code == 422
+
+
+def test_auth_token_enforced_when_configured(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEMO_AUTH_TOKEN", "secret")
+
+    assert client.get("/api/config").status_code == 401
+    assert client.get("/api/config", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.post("/api/ask", json={"question": "x"}).status_code == 401
+
+    ok = client.get("/api/config", headers={"Authorization": "Bearer secret"})
+    assert ok.status_code == 200
+    # /health stays open for liveness probes
+    assert client.get("/health").status_code == 200
+
+
+def test_bad_backend_config_env_returns_clean_500(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RAG_BACKEND_CONFIG", "{not json")
+    res = client.post("/api/retrieve", json={"question": "x"})
+    assert res.status_code == 500
+    assert "Invalid RAG_BACKEND_CONFIG" in res.json()["detail"]
+
+    monkeypatch.setenv("RAG_BACKEND_CONFIG", json.dumps(["not", "an", "object"]))
+    res = client.post("/api/retrieve", json={"question": "x"})
+    assert res.status_code == 500
+    assert "must be a JSON object" in res.json()["detail"]
+
+
+def test_root_serves_demo_ui(client: TestClient) -> None:
+    res = client.get("/")
+    assert res.status_code == 200
+    assert "<html" in res.text.lower()
