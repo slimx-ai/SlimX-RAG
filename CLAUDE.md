@@ -5,11 +5,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-uv sync --group dev          # install with dev deps (pytest, build)
+uv sync --group dev          # install with dev deps (pytest, ruff, mypy, build)
 uv run pytest -q             # run all tests
 uv run pytest tests/test_chunker.py -k test_name   # run a single test
+uv run ruff check .          # lint (CI enforces on all Python versions)
+uv run mypy                  # type check src/ (CI enforces on 3.12)
 uv run python -m build       # build the package (CI does this too)
 ```
+
+CLI error contract: user-input errors (bad paths, malformed JSONL, bad `--backend-config`) exit 2 with a one-line message; unexpected errors exit 1; pass `--verbose` (before the subcommand) for debug logs and tracebacks. All artifact writes are atomic (temp file + `os.replace` via `utils/commons.py` helpers). Incremental index state is committed strictly after a successful upsert + save (`IndexBackend.commit_state`) — state may lag the backend but never lead it.
 
 Optional extras enable specific providers/backends: `uv sync --extra openai|hf|doc|demo|faiss|qdrant|pgvector`.
 
