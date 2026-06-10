@@ -41,9 +41,13 @@ class FakeQdrantClient:
         self.collections: dict[str, int] = {}
         self.points: dict[str, dict[str, FakePointStruct]] = {}
         self.retrieve_calls: list[list[str]] = []
+        self.upsert_calls: list[list[FakePointStruct]] = []
+        self.fail_connect = False
         FakeQdrantClient.instances.append(self)
 
     def collection_exists(self, collection_name: str) -> bool:
+        if self.fail_connect:
+            raise ConnectionError("connection refused")
         return collection_name in self.collections
 
     def create_collection(self, *, collection_name: str, vectors_config: FakeVectorParams):
@@ -68,6 +72,7 @@ class FakeQdrantClient:
     def upsert(self, *, collection_name: str, points: list[FakePointStruct]):
         if collection_name not in self.collections:
             raise RuntimeError("collection was not created")
+        self.upsert_calls.append(list(points))
         store = self.points.setdefault(collection_name, {})
         for p in points:
             store[str(p.id)] = p
@@ -252,3 +257,45 @@ def test_qdrant_skip_existing_false_overwrites_existing_points(monkeypatch, tmp_
     client = FakeQdrantClient.instances[-1]
     assert written == 1
     assert client.points["slimx"]["c1"].payload["text"] == "new"
+
+
+def test_qdrant_upsert_and_retrieve_are_batched(monkeypatch, tmp_path):
+    install_fake_qdrant(monkeypatch)
+
+    from slimx_rag.index.qdrant_backend import QdrantIndexBackend
+
+    idx = QdrantIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(
+            backend="qdrant",
+            backend_config={"collection": "slimx", "dim": 2, "batch_size": 2},
+        ),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    written = idx.upsert([
+        EmbeddedChunk(chunk_id=f"c{i}", vector=[1.0, 0.0], text=f"t{i}", metadata={}) for i in range(5)
+    ])
+    client = FakeQdrantClient.instances[-1]
+
+    assert written == 5
+    assert [len(points) for points in client.upsert_calls] == [2, 2, 1]
+    assert [len(ids) for ids in client.retrieve_calls] == [2, 2, 1]
+    assert len(client.points["slimx"]) == 5
+
+
+def test_qdrant_connection_failure_raises_friendly_error(monkeypatch, tmp_path):
+    install_fake_qdrant(monkeypatch)
+
+    from slimx_rag.index.qdrant_backend import QdrantIndexBackend
+
+    idx = QdrantIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="qdrant", backend_config={"collection": "slimx"}),
+        state_path=tmp_path / "index_state.json",
+    )
+    FakeQdrantClient.instances[-1].fail_connect = True
+
+    with pytest.raises(RuntimeError, match="Could not reach Qdrant"):
+        idx.load()

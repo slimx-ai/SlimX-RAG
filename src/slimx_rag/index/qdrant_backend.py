@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from slimx_rag.embed import EmbeddedChunk
@@ -29,10 +30,30 @@ class QdrantIndexBackend(IndexBackend):
             ) from e
 
         self._qm = qm
-        url = str(cfg.get("url") or "http://localhost:6333")
+        self.url = str(cfg.get("url") or "http://localhost:6333")
+        self.batch_size = config_int(cfg, "batch_size", 256)
+        if self.batch_size <= 0:
+            raise ValueError("Qdrant backend_config['batch_size'] must be > 0")
         prefer_grpc = bool(cfg.get("prefer_grpc") or False)
-        self.client = QdrantClient(url=url, api_key=cfg.get("api" + "_key"), prefer_grpc=prefer_grpc)
+        self.client = QdrantClient(url=self.url, api_key=cfg.get("api" + "_key"), prefer_grpc=prefer_grpc)
         self.state = IndexState.load(self.state_path)
+
+        # Transport-level errors worth translating into a friendly message.
+        self._conn_errors: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError)
+        try:
+            from qdrant_client.http.exceptions import ResponseHandlingException  # type: ignore
+
+            self._conn_errors = (*self._conn_errors, ResponseHandlingException)
+        except ImportError:
+            pass
+
+    @contextmanager
+    def _network(self) -> Iterator[None]:
+        """Translate transport errors into a friendly RuntimeError; re-raise the rest."""
+        try:
+            yield
+        except self._conn_errors as e:
+            raise RuntimeError(f"Could not reach Qdrant at {self.url}: {e}. Is the server running?") from e
 
     def _configured_dim(self) -> int:
         return config_int(self.settings.backend_config, "dim", 0)
@@ -47,14 +68,15 @@ class QdrantIndexBackend(IndexBackend):
     def _ensure_collection(self, dim: int) -> None:
         if dim <= 0:
             raise ValueError("Qdrant collection dimension must be > 0")
-        if not self.client.collection_exists(self.collection):
-            self.client.create_collection(
-                collection_name=self.collection,
-                vectors_config=self._qm.VectorParams(size=dim, distance=self._qm.Distance.COSINE),
-            )
-            self._dim = dim
-            return
-        info = self.client.get_collection(self.collection)
+        with self._network():
+            if not self.client.collection_exists(self.collection):
+                self.client.create_collection(
+                    collection_name=self.collection,
+                    vectors_config=self._qm.VectorParams(size=dim, distance=self._qm.Distance.COSINE),
+                )
+                self._dim = dim
+                return
+            info = self.client.get_collection(self.collection)
         existing_dim = self._collection_dim(info)
         if existing_dim is not None:
             if existing_dim != dim:
@@ -64,19 +86,26 @@ class QdrantIndexBackend(IndexBackend):
             self._dim = dim
 
     def _existing_ids(self, ids: list[str]) -> set[str]:
-        if not ids or not self.client.collection_exists(self.collection):
-            return set()
-        points = self.client.retrieve(
-            collection_name=self.collection,
-            ids=ids,
-            with_payload=False,
-            with_vectors=False,
-        )
-        return {str(p.id) for p in points or []}
+        with self._network():
+            if not ids or not self.client.collection_exists(self.collection):
+                return set()
+            found: set[str] = set()
+            for start in range(0, len(ids), self.batch_size):
+                points = self.client.retrieve(
+                    collection_name=self.collection,
+                    ids=ids[start : start + self.batch_size],
+                    with_payload=False,
+                    with_vectors=False,
+                )
+                found.update(str(p.id) for p in points or [])
+            return found
 
     def load(self) -> None:
-        if self.client.collection_exists(self.collection):
-            info = self.client.get_collection(self.collection)
+        with self._network():
+            collection_exists = self.client.collection_exists(self.collection)
+        if collection_exists:
+            with self._network():
+                info = self.client.get_collection(self.collection)
             existing_dim = self._collection_dim(info)
             if existing_dim is not None:
                 cfg_dim = self._configured_dim()
@@ -96,7 +125,10 @@ class QdrantIndexBackend(IndexBackend):
         ids = [str(x) for x in chunk_ids if str(x)]
         if not ids:
             return 0
-        self.client.delete(collection_name=self.collection, points_selector=self._qm.PointIdsList(points=ids))
+        with self._network():
+            for start in range(0, len(ids), self.batch_size):
+                batch = ids[start : start + self.batch_size]
+                self.client.delete(collection_name=self.collection, points_selector=self._qm.PointIdsList(points=batch))
         return len(ids)
 
     def upsert(self, items: Iterable[EmbeddedChunk], *, skip_existing: bool = True) -> int:
@@ -122,7 +154,12 @@ class QdrantIndexBackend(IndexBackend):
             points.append(self._qm.PointStruct(id=cid, vector=vector, payload=payload))
             written += 1
         if points:
-            self.client.upsert(collection_name=self.collection, points=points)
+            with self._network():
+                for start in range(0, len(points), self.batch_size):
+                    self.client.upsert(
+                        collection_name=self.collection,
+                        points=points[start : start + self.batch_size],
+                    )
         return written
 
     def query(self, query_vector: list[float], *, top_k: int | None = None) -> list[SearchResult]:
@@ -130,12 +167,13 @@ class QdrantIndexBackend(IndexBackend):
             raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {self._dim}")
         k = int(top_k or self.settings.top_k)
         candidate_k = max(k, k * 4)
-        res = self.client.search(
-            collection_name=self.collection,
-            query_vector=list(map(float, query_vector)),
-            limit=candidate_k,
-            with_payload=True,
-        )
+        with self._network():
+            res = self.client.search(
+                collection_name=self.collection,
+                query_vector=list(map(float, query_vector)),
+                limit=candidate_k,
+                with_payload=True,
+            )
         out: list[SearchResult] = []
         for p in res:
             payload = p.payload or {}

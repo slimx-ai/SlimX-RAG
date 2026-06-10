@@ -171,6 +171,9 @@ def _index_chunks_file(
         items = iter(materialized)
     written = idx.upsert(items, skip_existing=not reindex)
     idx.save()
+    # Commit state strictly after a successful upsert + save: a crash earlier
+    # leaves state behind the backend (a re-run converges), never ahead of it.
+    idx.commit_state(current_docs)
 
     return deleted, written, len(idx)
 

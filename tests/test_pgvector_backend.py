@@ -75,12 +75,19 @@ class FakeConnection:
         self.commits += 1
 
 
+class FakeOperationalError(Exception):
+    pass
+
+
 class FakePsycopg:
     connections: list[FakeConnection] = []
     rows: dict[str, dict] = {}
+    fail_connect = False
 
     @classmethod
     def connect(cls, dsn: str):
+        if cls.fail_connect:
+            raise FakeOperationalError("connection refused")
         conn = FakeConnection(dsn)
         conn.rows = cls.rows
         cls.connections.append(conn)
@@ -90,7 +97,8 @@ class FakePsycopg:
 def install_fake_psycopg(monkeypatch):
     FakePsycopg.connections.clear()
     FakePsycopg.rows.clear()
-    fake = types.SimpleNamespace(connect=FakePsycopg.connect)
+    FakePsycopg.fail_connect = False
+    fake = types.SimpleNamespace(connect=FakePsycopg.connect, OperationalError=FakeOperationalError)
     monkeypatch.setitem(sys.modules, "psycopg", fake)
 
 
@@ -172,6 +180,67 @@ def test_pgvector_applies_metadata_whitelist(monkeypatch, tmp_path):
     ])
 
     assert latest_connection().rows["c1"]["metadata"] == {"keep": 1}
+
+
+def test_pgvector_rejects_invalid_table_and_schema_identifiers(monkeypatch, tmp_path):
+    install_fake_psycopg(monkeypatch)
+
+    from slimx_rag.index.pgvector_backend import PgVectorIndexBackend
+
+    for key, value in (("table", 'x"; DROP TABLE users; --'), ("schema", "bad schema"), ("table", "1starts_digit")):
+        with pytest.raises(ValueError, match="SQL identifier"):
+            PgVectorIndexBackend(
+                tmp_path / "unused.index",
+                settings=IndexSettings(
+                    backend="pgvector",
+                    backend_config={"dsn": "postgresql://test/db", key: value},
+                ),
+                state_path=tmp_path / "index_state.json",
+            )
+
+
+def test_pgvector_upsert_batches_by_batch_size(monkeypatch, tmp_path):
+    install_fake_psycopg(monkeypatch)
+
+    from slimx_rag.index.pgvector_backend import PgVectorIndexBackend
+
+    idx = PgVectorIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(
+            backend="pgvector",
+            backend_config={"dsn": "postgresql://test/db", "batch_size": 2},
+        ),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    written = idx.upsert([
+        EmbeddedChunk(chunk_id=f"c{i}", vector=[1.0, 0.0], text=f"t{i}", metadata={}) for i in range(5)
+    ])
+
+    assert written == 5
+    insert_calls = [
+        (sql, params) for conn in FakePsycopg.connections for sql, params in conn.executed if "INSERT INTO" in sql
+    ]
+    assert len(insert_calls) == 3  # ceil(5 / 2)
+    assert [len(params) for _sql, params in insert_calls] == [2, 2, 1]
+    assert len(latest_connection().rows) == 5
+
+
+def test_pgvector_connection_failure_raises_friendly_error(monkeypatch, tmp_path):
+    install_fake_psycopg(monkeypatch)
+
+    from slimx_rag.index.pgvector_backend import PgVectorIndexBackend
+
+    idx = PgVectorIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="pgvector", backend_config={"dsn": "postgresql://test/db", "dim": 2}),
+        state_path=tmp_path / "index_state.json",
+    )
+    FakePsycopg.fail_connect = True
+
+    with pytest.raises(RuntimeError, match="Could not connect to Postgres"):
+        idx.load()
 
 
 def test_pgvector_query_orders_equal_scores_by_chunk_id(monkeypatch, tmp_path):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -8,6 +9,16 @@ from slimx_rag.settings import IndexSettings
 
 from .base import IndexBackend, config_int
 from .types import IndexState, SearchResult
+
+# Schema/table names are interpolated into SQL statements, so they must be
+# plain identifiers (they are operator-supplied config, not end-user data).
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(value: str, *, what: str) -> str:
+    if not _SQL_IDENTIFIER_RE.match(value):
+        raise ValueError(f"pgvector {what} must be a valid SQL identifier (letters, digits, underscore): {value!r}")
+    return value
 
 
 def _vector_literal(vec: list[float]) -> str:
@@ -34,9 +45,12 @@ class PgVectorIndexBackend(IndexBackend):
         if not self.dsn:
             raise ValueError("pgvector backend requires settings.backend_config['dsn']")
 
-        self.schema = str(cfg.get("schema") or "public")
-        self.table = str(cfg.get("table") or "slimx_vectors")
+        self.schema = _validate_identifier(str(cfg.get("schema") or "public"), what="schema")
+        self.table = _validate_identifier(str(cfg.get("table") or "slimx_vectors"), what="table")
         self.create_table = bool(cfg.get("create_table") if cfg.get("create_table") is not None else True)
+        self.batch_size = config_int(cfg, "batch_size", 256)
+        if self.batch_size <= 0:
+            raise ValueError("pgvector backend_config['batch_size'] must be > 0")
 
         try:
             import psycopg  # type: ignore
@@ -49,7 +63,12 @@ class PgVectorIndexBackend(IndexBackend):
         self.state = IndexState.load(self.state_path)
 
     def _connect(self):
-        return self._psycopg.connect(self.dsn)
+        try:
+            return self._psycopg.connect(self.dsn)
+        except self._psycopg.OperationalError as e:
+            raise RuntimeError(
+                f"Could not connect to Postgres: {e}. Is the server running and the dsn correct?"
+            ) from e
 
     @property
     def _fqtn(self) -> str:
@@ -127,29 +146,29 @@ class PgVectorIndexBackend(IndexBackend):
         if not rows:
             return 0
 
+        if skip_existing:
+            sql = f"""
+                INSERT INTO {self._fqtn} (chunk_id, embedding, text, metadata)
+                VALUES (%s, %s::vector, %s, %s)
+                ON CONFLICT (chunk_id) DO NOTHING;
+                """
+        else:
+            sql = f"""
+                INSERT INTO {self._fqtn} (chunk_id, embedding, text, metadata)
+                VALUES (%s, %s::vector, %s, %s)
+                ON CONFLICT (chunk_id)
+                DO UPDATE SET embedding = EXCLUDED.embedding, text = EXCLUDED.text,
+                              metadata = EXCLUDED.metadata;
+                """
+
+        written = 0
+        # Batched within one connection/transaction to bound per-statement size.
         with self._connect() as conn:
             with conn.cursor() as cur:
-                if skip_existing:
-                    cur.executemany(
-                        f"""
-                        INSERT INTO {self._fqtn} (chunk_id, embedding, text, metadata)
-                        VALUES (%s, %s::vector, %s, %s)
-                        ON CONFLICT (chunk_id) DO NOTHING;
-                        """,
-                        rows,
-                    )
-                else:
-                    cur.executemany(
-                        f"""
-                        INSERT INTO {self._fqtn} (chunk_id, embedding, text, metadata)
-                        VALUES (%s, %s::vector, %s, %s)
-                        ON CONFLICT (chunk_id)
-                        DO UPDATE SET embedding = EXCLUDED.embedding, text = EXCLUDED.text,
-                                      metadata = EXCLUDED.metadata;
-                        """,
-                        rows,
-                    )
-                written = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(rows)
+                for start in range(0, len(rows), self.batch_size):
+                    batch = rows[start : start + self.batch_size]
+                    cur.executemany(sql, batch)
+                    written += cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(batch)
             conn.commit()
 
         return int(written)

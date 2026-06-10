@@ -115,6 +115,9 @@ class IndexBackend(ABC):
 
         current_docs: doc_id -> (content_hash, [chunk_ids])
         Returns number of deleted chunks.
+
+        This only issues backend deletes; it does not touch persisted state.
+        Call commit_state() after a successful upsert + save.
         """
         deleted = 0
         previous_doc_ids = set(self.state.docs.keys())
@@ -124,17 +127,25 @@ class IndexBackend(ABC):
         for doc_id in (previous_doc_ids - current_doc_ids):
             old = self.state.docs.get(doc_id) or {}
             deleted += self.delete(old.get("chunk_ids", []) or [])
-            self.state.docs.pop(doc_id, None)
 
         # Changed docs: content_hash differs
         for doc_id in current_doc_ids:
-            new_hash, new_chunk_ids = current_docs[doc_id]
+            new_hash, _new_chunk_ids = current_docs[doc_id]
             old = self.state.docs.get(doc_id) or {}
             if old and str(old.get("content_hash")) != str(new_hash):
                 deleted += self.delete(old.get("chunk_ids", []) or [])
 
-            # Update state to reflect current doc version + chunk ids (even before upsert).
-            # (If you need stronger crash-consistency, update state after a successful save.)
-            self.state.docs[doc_id] = {"content_hash": new_hash, "chunk_ids": list(new_chunk_ids)}
-
         return deleted
+
+    def commit_state(self, current_docs: dict[str, tuple[str, list[str]]]) -> None:
+        """Persist the doc-level state after a successful upsert + save.
+
+        Crash-safety invariant: state is committed strictly last, so it may lag
+        the backend (a re-run re-issues idempotent deletes/upserts and converges)
+        but never runs ahead of it.
+        """
+        self.state.docs = {
+            doc_id: {"content_hash": content_hash, "chunk_ids": list(chunk_ids)}
+            for doc_id, (content_hash, chunk_ids) in current_docs.items()
+        }
+        self._save_state_if_enabled()

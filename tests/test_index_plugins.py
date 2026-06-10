@@ -113,6 +113,7 @@ def test_index_backend_local_roundtrip_and_query(tmp_path):
     assert written == 2
     assert idx.dim == 2
     idx.save()
+    idx.commit_state(current_docs)
 
     # Reload and query
     idx2 = make_index_backend(idx_path, settings=settings, state_path=st_path)
@@ -129,6 +130,7 @@ def test_index_backend_local_roundtrip_and_query(tmp_path):
     deleted = idx2.apply_incremental_plan(current_docs={"doc1": ("h1", ["c1"])})
     assert deleted == 1
     idx2.save()
+    idx2.commit_state({"doc1": ("h1", ["c1"])})
 
     idx3 = make_index_backend(idx_path, settings=settings, state_path=st_path)
     idx3.load()

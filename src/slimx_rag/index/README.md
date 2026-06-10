@@ -102,17 +102,19 @@ Expected behavior:
 - **Doc unchanged**: keep existing chunks.
 
 To avoid duplicating this logic, `apply_incremental_plan()` is implemented once in `IndexBackend` and uses `delete()`.
+It only issues backend deletes; persisted state is updated separately via `commit_state(current_docs)`.
 
-### Crash-consistency guideline
+### Crash-consistency contract
 
-Best-effort pattern:
+The pipeline applies this order:
 
-1) apply plan (deletes)
+1) apply plan (deletes only)
 2) upsert new chunks
 3) save index structures
-4) save state
+4) `commit_state(current_docs)` — replace and persist doc-level state
 
-Not all backends can make index + state fully transactional, but aim for this order.
+State is committed strictly last: after a crash it may lag the backend (a re-run
+re-issues idempotent deletes/upserts and converges) but never runs ahead of it.
 
 ---
 
