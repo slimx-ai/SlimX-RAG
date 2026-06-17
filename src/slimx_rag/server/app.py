@@ -99,6 +99,10 @@ class QuestionRequest(BaseModel):
     question: str
     model: str | None = None
     top_k: int | None = Field(default=None, gt=0)
+    # Optional retrieval scope. When set, only chunks whose metadata matches are
+    # returned (chunks are tagged with workspace_id/document_id at ingest time).
+    workspace_id: str | None = None
+    document_ids: list[str] | None = None
 
 
 class EvalRequest(BaseModel):
@@ -161,6 +165,8 @@ def retrieve_endpoint(payload: QuestionRequest, authorization: str | None = Head
         embed_settings=_embed_settings(),
         index_settings=_index_settings(),
         top_k=payload.top_k,
+        workspace_id=payload.workspace_id,
+        document_ids=payload.document_ids,
     )
     return result.to_dict()
 
@@ -241,6 +247,8 @@ def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(de
         embed_settings=_embed_settings(),
         index_settings=_index_settings(),
         top_k=payload.top_k,
+        workspace_id=payload.workspace_id,
+        document_ids=payload.document_ids,
     )
     model: str = payload.model or os.getenv("SLIMX_LLM_MODEL") or "fake:grounded"
     result = answer(

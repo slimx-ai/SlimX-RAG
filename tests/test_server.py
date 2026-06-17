@@ -162,3 +162,30 @@ def test_index_changed_content_replaces_and_isolates_other_docs(ingest_client: T
     assert "omega" in all_chunks   # docA new content present
     assert "beta" in all_chunks    # docB untouched
     assert "alpha" not in all_chunks  # docA old content replaced
+
+
+def _ws_set(body: dict) -> set:
+    return {c["metadata"].get("workspace_id") for c in body.get("chunks", [])}
+
+
+def test_retrieve_scopes_by_workspace_and_document(ingest_client: TestClient) -> None:
+    ingest_client.post("/api/index", json={"workspace_id": "wsA", "document_id": "dA", "text": "shared keyword apple"})
+    ingest_client.post("/api/index", json={"workspace_id": "wsB", "document_id": "dB", "text": "shared keyword banana"})
+
+    # Unscoped: both workspaces' chunks are candidates.
+    everything = ingest_client.post("/api/retrieve", json={"question": "shared keyword", "top_k": 10}).json()
+    assert {"wsA", "wsB"} <= _ws_set(everything)
+
+    # Scoped to wsA: only wsA chunks come back.
+    scoped = ingest_client.post(
+        "/api/retrieve", json={"question": "shared keyword", "top_k": 10, "workspace_id": "wsA"}
+    ).json()
+    assert scoped["chunks"]
+    assert _ws_set(scoped) == {"wsA"}
+
+    # Further scoped to a non-matching document within the workspace: empty.
+    none_match = ingest_client.post(
+        "/api/retrieve",
+        json={"question": "shared keyword", "top_k": 10, "workspace_id": "wsA", "document_ids": ["dZ"]},
+    ).json()
+    assert none_match["chunks"] == []

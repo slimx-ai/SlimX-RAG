@@ -62,6 +62,8 @@ def retrieve(
     index_settings: IndexSettings,
     state_path: Path | None = None,
     top_k: int | None = None,
+    workspace_id: str | None = None,
+    document_ids: list[str] | None = None,
 ) -> RetrievalResult:
     started = time.perf_counter()
     idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)
@@ -69,7 +71,28 @@ def retrieve(
 
     embedder = make_embedder(embed_settings)
     qvec = embedder.embed_texts([question])[0]
-    raw_results = idx.query(list(map(float, qvec)), top_k=top_k or index_settings.top_k)
+    k = top_k or index_settings.top_k
+
+    scope_ws = str(workspace_id) if workspace_id else None
+    scope_docs = {str(d) for d in document_ids} if document_ids else None
+    if scope_ws or scope_docs:
+        # Scope to one workspace (and optionally specific documents) by filtering chunk
+        # metadata. Over-fetch the whole index so the post-filter is exact — this relies
+        # on the in-memory local backend's len(); remote backends should push the filter
+        # down natively (TODO when those become active).
+        fetch_k = len(idx) or k
+        candidates = idx.query(list(map(float, qvec)), top_k=fetch_k)
+
+        def _in_scope(md: dict[str, object]) -> bool:
+            if scope_ws is not None and str(md.get("workspace_id")) != scope_ws:
+                return False
+            if scope_docs is not None and str(md.get("document_id")) not in scope_docs:
+                return False
+            return True
+
+        raw_results = [r for r in candidates if _in_scope(r.metadata or {})][:k]
+    else:
+        raw_results = idx.query(list(map(float, qvec)), top_k=k)
     chunks = [RetrievedChunk.from_search_result(result) for result in raw_results]
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     return RetrievalResult(
