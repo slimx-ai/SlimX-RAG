@@ -2,17 +2,23 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
+from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
 from slimx_rag.answer import answer
+from slimx_rag.chunk import chunk_documents
+from slimx_rag.core.hashing import content_hash, path_id
+from slimx_rag.embed import EmbeddedChunk, embed_chunks
 from slimx_rag.eval import load_eval_cases, run_eval
+from slimx_rag.index import make_index_backend
 from slimx_rag.retrieval import retrieve
-from slimx_rag.settings import EmbedSettings, IndexSettings
+from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexSettings
 
 
 def _backend_config() -> dict[str, object]:
@@ -47,6 +53,14 @@ def _embed_settings() -> EmbedSettings:
         model=os.getenv("RAG_EMBED_MODEL", "text-embedding-3-small"),
         hf_model=os.getenv("RAG_HF_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
         dim=int(os.getenv("RAG_EMBED_DIM", "384")),
+    )
+
+
+def _chunk_settings() -> ChunkSettings:
+    defaults = ChunkSettings()
+    return ChunkSettings(
+        chunk_size=int(os.getenv("RAG_CHUNK_SIZE", str(defaults.chunk_size))),
+        chunk_overlap=int(os.getenv("RAG_CHUNK_OVERLAP", str(defaults.chunk_overlap))),
     )
 
 
@@ -93,7 +107,19 @@ class EvalRequest(BaseModel):
     top_k: int | None = Field(default=None, gt=0)
 
 
+class IndexRequest(BaseModel):
+    workspace_id: str
+    document_id: str
+    text: str
+    metadata: dict[str, Any] | None = None
+
+
 app = FastAPI(title="SlimX-RAG Research Demo")
+
+# Serialize index writes: the local JSONL backend has no internal locking, and ingest
+# does read-modify-write (load -> upsert -> save). Reads (retrieve) need no lock because
+# save() replaces the index file atomically (os.replace).
+_index_write_lock = threading.Lock()
 
 
 @app.get("/health")
@@ -137,6 +163,72 @@ def retrieve_endpoint(payload: QuestionRequest, authorization: str | None = Head
         top_k=payload.top_k,
     )
     return result.to_dict()
+
+
+@app.post("/api/index")
+def index_endpoint(payload: IndexRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """Ingest one posted document into the live index (chunk -> embed -> upsert).
+
+    Service mode is otherwise retrieval-only; this lets a downstream app index uploaded
+    documents over HTTP instead of via the CLI. Identity is derived from
+    workspace_id/document_id so re-posting the same document is idempotent (and a content
+    change replaces just that document's chunks). The next /api/retrieve sees the new
+    chunks immediately (retrieve re-reads the index per request).
+    """
+    _check_token(authorization)
+    embed_settings = _embed_settings()
+    index_settings = _index_settings()
+    chunk_settings = _chunk_settings()
+
+    kb_relpath = f"{payload.workspace_id}/{payload.document_id}"
+    doc_id = path_id(kb_relpath)
+    ch = content_hash(payload.text)
+    metadata: dict[str, Any] = {
+        "doc_id": doc_id,
+        "kb_relpath": kb_relpath,
+        "content_hash": ch,
+        "content_len": len(payload.text),
+        "source": f"api://{kb_relpath}",
+        "title": (payload.metadata or {}).get("title") or payload.document_id,
+        "workspace_id": payload.workspace_id,
+        "document_id": payload.document_id,
+    }
+    # Carry through caller metadata without overriding identity fields.
+    for key, value in (payload.metadata or {}).items():
+        if key not in ("doc_id", "kb_relpath", "content_hash"):
+            metadata.setdefault(key, value)
+
+    doc = Document(page_content=payload.text, metadata=metadata)
+    chunks = chunk_documents(
+        [doc],
+        chunk_size=chunk_settings.chunk_size,
+        chunk_overlap=chunk_settings.chunk_overlap,
+        separators=chunk_settings.separators,
+    )
+
+    with _index_write_lock:
+        idx = make_index_backend(_index_path(), settings=index_settings, state_path=_state_path())
+        idx.load()
+        idx.set_embed_config(embed_settings)
+        idx.delete_doc(doc_id)  # replace this document's chunks; no-op when new
+        items: list[EmbeddedChunk] = list(embed_chunks(iter(chunks), settings=embed_settings))
+        upserted = idx.upsert(items, skip_existing=False)
+        idx.save()
+        chunk_ids = [item.chunk_id for item in items]
+        idx.commit_doc_state(doc_id, ch, chunk_ids)
+        total = len(idx)
+
+    model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
+    return {
+        "status": "ready",
+        "doc_id": doc_id,
+        "rag_index_ref": f"slimx-rag:{doc_id}",
+        "chunk_count": len(chunk_ids),
+        "upserted": upserted,
+        "total": total,
+        "vector_backend": index_settings.backend,
+        "embed": {"provider": embed_settings.provider, "model": model, "dim": embed_settings.dim},
+    }
 
 
 @app.post("/api/ask")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -103,3 +104,61 @@ def test_root_serves_demo_ui(client: TestClient) -> None:
     res = client.get("/")
     assert res.status_code == 200
     assert "<html" in res.text.lower()
+
+
+# --- HTTP ingest (/api/index) -----------------------------------------------------
+@pytest.fixture
+def ingest_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """A client with its own empty index so ingest writes don't touch the shared one."""
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("RAG_INDEX_PATH", str(out / "index.jsonl"))
+    monkeypatch.setenv("RAG_STATE_PATH", str(out / "index_state.json"))
+    monkeypatch.setenv("RAG_EMBED_DIM", "16")
+    monkeypatch.delenv("DEMO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("RAG_BACKEND_CONFIG", raising=False)
+    return TestClient(app)
+
+
+def _texts(retrieve_body: dict) -> str:
+    return " ".join(c["text"] for c in retrieve_body.get("chunks", []))
+
+
+def test_index_ingests_and_is_retrievable(ingest_client: TestClient) -> None:
+    res = ingest_client.post(
+        "/api/index",
+        json={"workspace_id": "ws1", "document_id": "doc1", "text": "alpha beta gamma delta epsilon."},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "ready"
+    assert body["chunk_count"] >= 1
+    assert body["doc_id"]
+
+    # New chunks are visible to retrieve immediately.
+    r = ingest_client.post("/api/retrieve", json={"question": "beta gamma", "top_k": 5})
+    assert r.status_code == 200
+    assert "beta" in _texts(r.json())
+
+
+def test_index_is_idempotent_for_same_document(ingest_client: TestClient) -> None:
+    payload = {"workspace_id": "ws1", "document_id": "doc1", "text": "alpha beta gamma delta."}
+    first = ingest_client.post("/api/index", json=payload).json()
+    index_bytes = Path(os.environ["RAG_INDEX_PATH"]).read_bytes()
+
+    second = ingest_client.post("/api/index", json=payload).json()
+    assert second["doc_id"] == first["doc_id"]
+    # Same content -> deterministic chunk ids -> identical index file.
+    assert Path(os.environ["RAG_INDEX_PATH"]).read_bytes() == index_bytes
+
+
+def test_index_changed_content_replaces_and_isolates_other_docs(ingest_client: TestClient) -> None:
+    ingest_client.post("/api/index", json={"workspace_id": "ws1", "document_id": "docA", "text": "alpha alpha alpha."})
+    ingest_client.post("/api/index", json={"workspace_id": "ws1", "document_id": "docB", "text": "beta beta beta."})
+    # Re-index docA with new content.
+    ingest_client.post("/api/index", json={"workspace_id": "ws1", "document_id": "docA", "text": "omega omega omega."})
+
+    all_chunks = _texts(ingest_client.post("/api/retrieve", json={"question": "x", "top_k": 50}).json())
+    assert "omega" in all_chunks   # docA new content present
+    assert "beta" in all_chunks    # docB untouched
+    assert "alpha" not in all_chunks  # docA old content replaced

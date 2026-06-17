@@ -149,3 +149,22 @@ class IndexBackend(ABC):
             for doc_id, (content_hash, chunk_ids) in current_docs.items()
         }
         self._save_state_if_enabled()
+
+    # --- Per-document incremental ingest -------------------------------------------
+    # The whole-corpus ``apply_incremental_plan`` / ``commit_state`` above reconcile the
+    # full corpus in one pass (they delete docs absent from the set and replace the whole
+    # state). That is wrong for single-document HTTP ingest, where the caller knows about
+    # only one document and must not disturb the others. These helpers act on one doc.
+
+    def delete_doc(self, doc_id: str) -> int:
+        """Delete one document's currently-indexed chunks (best-effort, no-op if unknown)."""
+        old = self.state.docs.get(doc_id) or {}
+        return self.delete(old.get("chunk_ids", []) or [])
+
+    def commit_doc_state(self, doc_id: str, content_hash: str, chunk_ids: list[str]) -> None:
+        """Merge one document's state entry and persist; leaves other docs untouched.
+
+        Committed strictly after a successful upsert + save, like ``commit_state``.
+        """
+        self.state.docs[doc_id] = {"content_hash": content_hash, "chunk_ids": list(chunk_ids)}
+        self._save_state_if_enabled()

@@ -103,7 +103,14 @@ Outputs:
 The Docker image is **turnkey build-then-serve**: point it at a knowledge-base directory
 and it builds the index on first start (with the local `hf` sentence-transformers
 embedder, baked into the image — no network needed at runtime), then serves
-`/health`, `/api/retrieve`, and `/api/ask` on port 8080.
+`/health`, `/api/retrieve`, `/api/ask`, and `/api/index` on port 8080.
+
+`POST /api/index` `{workspace_id, document_id, text, metadata?}` ingests a single
+document into the live index (chunk → embed → upsert) so a downstream app can index
+uploaded documents over HTTP instead of rebuilding from a KB dir. Identity is derived
+from `workspace_id/document_id`, so re-posting the same document is idempotent and a
+content change replaces just that document's chunks. (Retrieval is still over one global
+index — `workspace_id`/`document_id` are stored in chunk metadata for future scoping.)
 
 ```bash
 # Build (or pull the published image: ghcr.io/slimx-ai/slimx-rag)
