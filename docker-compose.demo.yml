@@ -9,9 +9,15 @@ services:
       RAG_INDEX_BACKEND: ${RAG_INDEX_BACKEND:-local}
       RAG_INDEX_PATH: ${RAG_INDEX_PATH:-/data/index.jsonl}
       RAG_STATE_PATH: ${RAG_STATE_PATH:-/data/index_state.json}
+      RAG_EMBED_PROVIDER: ${RAG_EMBED_PROVIDER:-hf}
+      # The entrypoint builds the index from this KB on first start (when /data is
+      # empty), then serves it. Point RAG_KB_DIR_HOST at your own corpus to override.
+      RAG_KB_DIR: /kb
     volumes:
       - ./output:/data
+      - ${RAG_KB_DIR_HOST:-./examples/tiny_demo/knowledge-base}:/kb:ro
       - ./examples:/app/examples:ro
+    # qdrant is only needed when RAG_INDEX_BACKEND=qdrant (default is the local index).
     depends_on:
       - qdrant
 

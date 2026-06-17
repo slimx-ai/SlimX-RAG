@@ -98,6 +98,40 @@ Outputs:
 ---
 
 
+## Run as a Docker service
+
+The Docker image is **turnkey build-then-serve**: point it at a knowledge-base directory
+and it builds the index on first start (with the local `hf` sentence-transformers
+embedder, baked into the image — no network needed at runtime), then serves
+`/health`, `/api/retrieve`, and `/api/ask` on port 8080.
+
+```bash
+# Build (or pull the published image: ghcr.io/slimx-ai/slimx-rag)
+docker build -t slimxai/slimx-rag:hf .
+
+# Index a KB + serve in one container
+docker run --rm -p 8080:8080 \
+  -e RAG_KB_DIR=/kb \
+  -v "$PWD/examples/tiny_demo/knowledge-base:/kb:ro" \
+  -v slimx_rag_index:/app/output \
+  slimxai/slimx-rag:hf
+
+curl localhost:8080/health   # {"status":"ok","embed_provider":"hf",...}
+```
+
+Or use the demo compose (builds the image, indexes the bundled corpus, serves):
+
+```bash
+docker compose -f docker-compose.demo.yml up --build
+```
+
+Set `RAG_REINDEX=1` to rebuild the index on start. Override the embedder via
+`RAG_EMBED_PROVIDER` (`hash` | `openai` | `hf`) and related `RAG_*` env. The image is
+published to `ghcr.io/slimx-ai/slimx-rag` by `.github/workflows/publish-image.yaml` on
+release; downstream apps consume that image (they do not build it).
+
+---
+
 ## RAGOps artifacts
 
 SlimX-RAG can generate reproducibility and inspection artifacts for deterministic, auditable RAG indexing:
