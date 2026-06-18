@@ -26,6 +26,18 @@ uv run slimx-rag run --kb-dir examples/tiny_demo/knowledge-base --out-dir ./outp
 uv run slimx-rag ask --out-dir ./output --q "What is this knowledge base about?"
 ```
 
+Run as an HTTP service / in Docker:
+
+```bash
+# HTTP demo server (needs the `demo` extra; configured via RAG_*/SLIMX_* env, not flags)
+uv run slimx-rag serve --host 127.0.0.1 --port 8080
+
+# Turnkey Docker: build the index from a KB dir on first start, then serve
+docker run --rm -p 8080:8080 -e RAG_KB_DIR=/kb \
+  -v "$PWD/examples/tiny_demo/knowledge-base:/kb:ro" -v slimx_rag_index:/app/output \
+  ghcr.io/slimx-ai/slimx-rag:latest
+```
+
 ## Architecture
 
 A deterministic RAG pipeline: **ingest → chunk → embed → index → retrieve → answer → cite → evaluate → serve**. Each stage is a package under `src/slimx_rag/` and stages communicate through JSONL artifacts in an output directory: `docs.jsonl` → `chunks.jsonl` → `embeddings.jsonl` → `index.jsonl` + `index_state.json` (and optionally `manifest.json`). The CLI (`cli.py`, entry point `slimx-rag`) exposes each stage as a subcommand (`ingest`, `chunk`, `index`, `query`, `retrieve`, `ask`, `eval`, `serve`, `manifest`, `diff`, `report`, `run`) using shared argparse parent parsers.
@@ -51,6 +63,20 @@ Chunking sorts documents by a stable key before splitting; query results are sor
 ### Answer generation
 
 `answer/generator.py` takes model strings of the form `provider:model` (e.g. `openai:gpt-4.1-mini`, `ollama:llama3.2:3b`). `fake:grounded` is a deterministic, no-network model for tests and smoke checks. Real models are executed via the external `slimx` package (separate repo, installed with `uv pip install -e ../slimx`) — SlimX-RAG owns retrieval/citations/evaluation, SlimX owns model execution and traces. Per-provider defaults (timeout, max_tokens, context budget) are derived from the model prefix.
+
+### HTTP service mode (`server/`)
+
+`server/app.py` is a FastAPI app (the `serve` subcommand; needs the `demo` extra). Unlike the CLI, it is configured **entirely through environment variables**, rebuilt per request: `RAG_*` for index/embed/chunk settings (`RAG_INDEX_BACKEND`, `RAG_EMBED_PROVIDER`, `RAG_INDEX_PATH`, `RAG_STATE_PATH`, `RAG_TOP_K`, …), `SLIMX_*` for the LLM (`SLIMX_LLM_MODEL`, `SLIMX_LLM_TIMEOUT`, `SLIMX_LLM_MAX_TOKENS`, `SLIMX_MAX_CONTEXT_CHARS`), and optional `DEMO_AUTH_TOKEN` for Bearer auth. `serve` itself takes only `--host`/`--port`. See `.env.example` for the full surface.
+
+Endpoints: `GET /health`, `GET /api/config`, `POST /api/retrieve`, `POST /api/ask`, `POST /api/eval/run`, `POST /api/index`, and `GET /` (HTML UI from `server/static/index.html`).
+
+The server keeps **one hot in-memory backend** (`_current_backend()`), loaded once and reused across requests — `retrieve()` otherwise re-reads and re-parses the whole index file every call. The cache is refreshed only when the index file's `(mtime, size)` changes (e.g. an external CLI rebuild); pass `backend=` to `retrieve()` to inject it. A single reentrant `_index_lock` guards both the cached backend and the read-modify-write ingest path, so reads never see a half-applied write. `_reset_index_cache()` exists for tests.
+
+Service mode is retrieval-only except `POST /api/index`, which ingests one posted document (chunk → embed → upsert) so a downstream app can index over HTTP. It reuses the hot backend under `_index_lock` (load amortized across posts) and `save()`s atomically (`os.replace`). Identity is `path_id("{workspace_id}/{document_id}")`, so re-posting is idempotent — it calls `delete_doc` + `commit_doc_state` (the single-document analogues of `apply_incremental_plan`/`commit_state`) to replace just that document's chunks.
+
+Retrieval scoping: `/api/retrieve` and `/api/ask` accept optional `workspace_id`/`document_ids` that filter chunks by metadata tagged at index time. This works by over-fetching the whole index and post-filtering, so it is **local-backend only** — backends without `supports_inmemory_scope_filter` (qdrant/pgvector/faiss) raise `ScopeNotSupportedError` (HTTP 400) instead of silently returning under-filled results. Backend-native filter pushdown is the tracked follow-up.
+
+Docker: a turnkey build-then-serve image (`Dockerfile`, `docker-entrypoint.sh`). The entrypoint runs `slimx-rag run` to build the index from `RAG_KB_DIR` on first start (or when `RAG_REINDEX` is set), then `slimx-rag serve`. The default embedder is `hf` with the model baked into the image (no runtime network). Published to `ghcr.io/slimx-ai/slimx-rag` on release by `.github/workflows/publish-image.yaml`; `deploy/vps/` holds a Caddy + Compose VPS deployment.
 
 ### RAGOps modules
 

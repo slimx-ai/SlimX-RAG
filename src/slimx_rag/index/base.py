@@ -30,6 +30,13 @@ class IndexBackend(ABC):
     The pipeline (CLI + future library users) should depend only on this interface.
     """
 
+    # Whether retrieval-time metadata scoping (workspace_id/document_ids) can be served by
+    # over-fetching the whole index and filtering in Python. Only safe for backends that
+    # hold every vector in memory and report len() accurately (the local backend).
+    # Remote/ANN backends must push the filter down natively before enabling this; until
+    # then, retrieve() raises rather than silently returning under-filled results.
+    supports_inmemory_scope_filter: bool = False
+
     def __init__(
         self,
         index_path: Path,

@@ -6,9 +6,18 @@ from pathlib import Path
 from typing import Any
 
 from slimx_rag.embed import make_embedder
-from slimx_rag.index import make_index_backend
+from slimx_rag.index import IndexBackend, make_index_backend
 from slimx_rag.index.types import SearchResult
 from slimx_rag.settings import EmbedSettings, IndexSettings
+
+
+class ScopeNotSupportedError(ValueError):
+    """Raised when workspace/document scoping is requested on a backend that cannot serve it.
+
+    Scoping is applied by over-fetching the whole index and filtering chunk metadata in
+    Python, which is only correct for in-memory backends that report len() accurately
+    (the local backend). Remote/ANN backends must push the filter down natively first.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,22 +73,35 @@ def retrieve(
     top_k: int | None = None,
     workspace_id: str | None = None,
     document_ids: list[str] | None = None,
+    backend: IndexBackend | None = None,
 ) -> RetrievalResult:
     started = time.perf_counter()
-    idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)
-    idx.load()
+    # A caller (e.g. the server) may pass a pre-loaded backend to avoid re-reading the
+    # index from disk on every request; otherwise construct + load one as before.
+    if backend is not None:
+        idx = backend
+    else:
+        idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)
+        idx.load()
+
+    scope_ws = str(workspace_id) if workspace_id else None
+    scope_docs = {str(d) for d in document_ids} if document_ids else None
+    if (scope_ws or scope_docs) and not getattr(idx, "supports_inmemory_scope_filter", False):
+        raise ScopeNotSupportedError(
+            f"workspace_id/document_ids scoping is not supported by the "
+            f"{index_settings.backend!r} backend; use the 'local' backend "
+            f"(backend-native filtering for remote backends is not yet implemented)."
+        )
 
     embedder = make_embedder(embed_settings)
     qvec = embedder.embed_texts([question])[0]
     k = top_k or index_settings.top_k
 
-    scope_ws = str(workspace_id) if workspace_id else None
-    scope_docs = {str(d) for d in document_ids} if document_ids else None
     if scope_ws or scope_docs:
         # Scope to one workspace (and optionally specific documents) by filtering chunk
-        # metadata. Over-fetch the whole index so the post-filter is exact — this relies
-        # on the in-memory local backend's len(); remote backends should push the filter
-        # down natively (TODO when those become active).
+        # metadata. Over-fetch the whole index so the post-filter is exact; this is safe
+        # only because the guard above restricts scoping to backends that report len()
+        # accurately (supports_inmemory_scope_filter).
         fetch_k = len(idx) or k
         candidates = idx.query(list(map(float, qvec)), top_k=fetch_k)
 

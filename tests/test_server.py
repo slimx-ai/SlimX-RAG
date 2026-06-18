@@ -189,3 +189,63 @@ def test_retrieve_scopes_by_workspace_and_document(ingest_client: TestClient) ->
         json={"question": "shared keyword", "top_k": 10, "workspace_id": "wsA", "document_ids": ["dZ"]},
     ).json()
     assert none_match["chunks"] == []
+
+
+# --- index caching + scoping guard ------------------------------------------------
+def test_retrieve_reuses_cached_index_until_file_changes(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    import slimx_rag.index.local as local_mod
+
+    appmod = importlib.import_module("slimx_rag.server.app")
+    appmod._reset_index_cache()
+    loads = {"n": 0}
+    orig_load = local_mod.LocalJsonlIndexBackend.load
+
+    def counting_load(self: local_mod.LocalJsonlIndexBackend) -> None:
+        loads["n"] += 1
+        orig_load(self)
+
+    monkeypatch.setattr(local_mod.LocalJsonlIndexBackend, "load", counting_load)
+
+    client.post("/api/retrieve", json={"question": "build", "top_k": 1})
+    client.post("/api/retrieve", json={"question": "build", "top_k": 1})
+    assert loads["n"] == 1  # second retrieve reuses the hot backend, no reload
+
+    # Simulate an out-of-band rebuild by bumping the index file's mtime.
+    p = Path(os.environ["RAG_INDEX_PATH"])
+    st = p.stat()
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    client.post("/api/retrieve", json={"question": "build", "top_k": 1})
+    assert loads["n"] == 2  # a changed file triggers exactly one reload
+
+
+def test_scoped_retrieve_on_unsupported_backend_returns_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    appmod = importlib.import_module("slimx_rag.server.app")
+
+    monkeypatch.setenv("RAG_INDEX_BACKEND", "qdrant")
+
+    class _FakeRemoteBackend:
+        supports_inmemory_scope_filter = False
+
+        def __len__(self) -> int:
+            return 0
+
+        def query(self, vector: list[float], *, top_k: int | None = None) -> list:
+            return []
+
+    monkeypatch.setattr(appmod, "_current_backend", lambda: _FakeRemoteBackend())
+
+    scoped = client.post("/api/retrieve", json={"question": "x", "workspace_id": "wsA"})
+    assert scoped.status_code == 400
+    detail = scoped.json()["detail"].lower()
+    assert "scoping" in detail and "qdrant" in detail
+
+    # Unscoped retrieval still works against the same backend (guard not triggered).
+    assert client.post("/api/retrieve", json={"question": "x"}).status_code == 200

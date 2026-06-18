@@ -78,6 +78,33 @@ def test_local_query_orders_equal_scores_by_chunk_id(tmp_path):
     assert [r.chunk_id for r in idx.query([1.0, 0.0], top_k=3)] == ["c1", "c2", "c3"]
 
 
+def test_local_query_ranks_by_cosine_and_survives_mutation(tmp_path):
+    """The vectorized (numpy) query must rank by cosine similarity and stay correct
+    after upsert/delete invalidate the cached matrix."""
+    idx = make_index_backend(
+        tmp_path / "index.jsonl",
+        settings=IndexSettings(backend="local", top_k=3),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+    idx.upsert([
+        EmbeddedChunk(chunk_id="near", vector=[1.0, 0.1], text="near", metadata={}),
+        EmbeddedChunk(chunk_id="mid", vector=[1.0, 1.0], text="mid", metadata={}),
+        EmbeddedChunk(chunk_id="far", vector=[0.0, 1.0], text="far", metadata={}),
+    ])
+    # Query aligned with x-axis: ranking is near > mid > far by cosine.
+    assert [r.chunk_id for r in idx.query([1.0, 0.0], top_k=3)] == ["near", "mid", "far"]
+    # A zero query vector yields all-zero scores (no NaNs from the divide).
+    assert all(r.score == 0.0 for r in idx.query([0.0, 0.0], top_k=3))
+
+    # Mutating the index must invalidate the cached matrix used by query().
+    idx.delete(["near"])
+    idx.upsert([EmbeddedChunk(chunk_id="exact", vector=[1.0, 0.0], text="exact", metadata={})])
+    top = idx.query([1.0, 0.0], top_k=3)
+    assert top[0].chunk_id == "exact"
+    assert "near" not in {r.chunk_id for r in top}
+
+
 def test_index_backend_local_roundtrip_and_query(tmp_path):
     idx_path = tmp_path / "index.jsonl"
     st_path = tmp_path / "index_state.json"

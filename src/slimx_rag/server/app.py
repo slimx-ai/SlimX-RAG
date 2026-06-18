@@ -16,8 +16,8 @@ from slimx_rag.chunk import chunk_documents
 from slimx_rag.core.hashing import content_hash, path_id
 from slimx_rag.embed import EmbeddedChunk, embed_chunks
 from slimx_rag.eval import load_eval_cases, run_eval
-from slimx_rag.index import make_index_backend
-from slimx_rag.retrieval import retrieve
+from slimx_rag.index import IndexBackend, make_index_backend
+from slimx_rag.retrieval import ScopeNotSupportedError, retrieve
 from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexSettings
 
 
@@ -120,10 +120,55 @@ class IndexRequest(BaseModel):
 
 app = FastAPI(title="SlimX-RAG Research Demo")
 
-# Serialize index writes: the local JSONL backend has no internal locking, and ingest
-# does read-modify-write (load -> upsert -> save). Reads (retrieve) need no lock because
-# save() replaces the index file atomically (os.replace).
-_index_write_lock = threading.Lock()
+# One hot, in-process index shared by all requests. retrieve() otherwise re-reads and
+# re-parses the entire index file on every call (seconds per request as the corpus grows);
+# here we load it once and reuse it, refreshing only when the on-disk file changes (e.g. an
+# external CLI rebuild). A single reentrant lock guards both the cached backend's in-memory
+# state and the read-modify-write ingest path, so reads never observe a half-applied write.
+_index_lock = threading.RLock()
+_backend: IndexBackend | None = None
+_backend_token: tuple[object, ...] | None = None
+
+
+def _index_token(path: Path) -> tuple[object, ...]:
+    try:
+        st = path.stat()
+        return (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (str(path), -1, -1)
+
+
+def _cache_key() -> tuple[object, ...]:
+    settings = _index_settings()
+    return (_index_token(_index_path()), settings.backend, repr(settings.backend_config), str(_state_path()))
+
+
+def _current_backend() -> IndexBackend:
+    """Return the shared, loaded index backend, (re)loading only when its inputs change."""
+    global _backend, _backend_token
+    with _index_lock:
+        token = _cache_key()
+        if _backend is None or _backend_token != token:
+            backend = make_index_backend(_index_path(), settings=_index_settings(), state_path=_state_path())
+            backend.load()
+            _backend = backend
+            _backend_token = token
+        return _backend
+
+
+def _mark_index_written() -> None:
+    """Re-token the cache after our own write so the next read reuses the hot backend."""
+    global _backend_token
+    with _index_lock:
+        _backend_token = _cache_key()
+
+
+def _reset_index_cache() -> None:
+    """Drop the cached backend (used by tests; safe to call anytime)."""
+    global _backend, _backend_token
+    with _index_lock:
+        _backend = None
+        _backend_token = None
 
 
 @app.get("/health")
@@ -158,16 +203,21 @@ def config(authorization: str | None = Header(default=None)) -> dict[str, Any]:
 @app.post("/api/retrieve")
 def retrieve_endpoint(payload: QuestionRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
-    result = retrieve(
-        payload.question,
-        index_path=_index_path(),
-        state_path=_state_path(),
-        embed_settings=_embed_settings(),
-        index_settings=_index_settings(),
-        top_k=payload.top_k,
-        workspace_id=payload.workspace_id,
-        document_ids=payload.document_ids,
-    )
+    try:
+        with _index_lock:
+            result = retrieve(
+                payload.question,
+                index_path=_index_path(),
+                state_path=_state_path(),
+                embed_settings=_embed_settings(),
+                index_settings=_index_settings(),
+                top_k=payload.top_k,
+                workspace_id=payload.workspace_id,
+                document_ids=payload.document_ids,
+                backend=_current_backend(),
+            )
+    except ScopeNotSupportedError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return result.to_dict()
 
 
@@ -179,7 +229,7 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
     documents over HTTP instead of via the CLI. Identity is derived from
     workspace_id/document_id so re-posting the same document is idempotent (and a content
     change replaces just that document's chunks). The next /api/retrieve sees the new
-    chunks immediately (retrieve re-reads the index per request).
+    chunks immediately — reads and writes share one hot in-memory backend under _index_lock.
     """
     _check_token(authorization)
     embed_settings = _embed_settings()
@@ -212,14 +262,14 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
         separators=chunk_settings.separators,
     )
 
-    with _index_write_lock:
-        idx = make_index_backend(_index_path(), settings=index_settings, state_path=_state_path())
-        idx.load()
+    with _index_lock:
+        idx = _current_backend()  # hot backend; load is amortized across posts
         idx.set_embed_config(embed_settings)
         idx.delete_doc(doc_id)  # replace this document's chunks; no-op when new
         items: list[EmbeddedChunk] = list(embed_chunks(iter(chunks), settings=embed_settings))
         upserted = idx.upsert(items, skip_existing=False)
         idx.save()
+        _mark_index_written()  # our own write must not trigger a reload on the next read
         chunk_ids = [item.chunk_id for item in items]
         idx.commit_doc_state(doc_id, ch, chunk_ids)
         total = len(idx)
@@ -240,16 +290,22 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
 @app.post("/api/ask")
 def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
-    retrieval = retrieve(
-        payload.question,
-        index_path=_index_path(),
-        state_path=_state_path(),
-        embed_settings=_embed_settings(),
-        index_settings=_index_settings(),
-        top_k=payload.top_k,
-        workspace_id=payload.workspace_id,
-        document_ids=payload.document_ids,
-    )
+    try:
+        with _index_lock:
+            retrieval = retrieve(
+                payload.question,
+                index_path=_index_path(),
+                state_path=_state_path(),
+                embed_settings=_embed_settings(),
+                index_settings=_index_settings(),
+                top_k=payload.top_k,
+                workspace_id=payload.workspace_id,
+                document_ids=payload.document_ids,
+                backend=_current_backend(),
+            )
+    except ScopeNotSupportedError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    # answer() may call out to an LLM; run it outside the index lock.
     model: str = payload.model or os.getenv("SLIMX_LLM_MODEL") or "fake:grounded"
     result = answer(
         payload.question,
