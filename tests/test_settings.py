@@ -58,6 +58,7 @@ def test_chunk_settings_defaults_valid() -> None:
         ({"provider": "hash", "dim": 0}, "dim"),
         ({"provider": "openai", "model": "  "}, "model"),
         ({"max_chars": 0}, "max_chars"),
+        ({"device": "  "}, "device"),
     ],
 )
 def test_embed_settings_invalid(kwargs: dict, match: str) -> None:
@@ -67,6 +68,12 @@ def test_embed_settings_invalid(kwargs: dict, match: str) -> None:
 
 def test_embed_settings_defaults_valid() -> None:
     EmbedSettings().validate()
+
+
+def test_embed_settings_accepts_device() -> None:
+    # A device string is valid; None (default) is also valid and auto-selects.
+    EmbedSettings(provider="hf", device="cuda").validate()
+    assert EmbedSettings().device is None
 
 
 @pytest.mark.parametrize(

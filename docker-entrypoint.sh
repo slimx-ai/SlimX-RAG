@@ -16,9 +16,11 @@ out_dir=$(dirname "$RAG_INDEX_PATH")
 : "${RAG_EMBED_PROVIDER:=hf}"
 : "${RAG_HF_MODEL:=sentence-transformers/all-MiniLM-L6-v2}"
 : "${RAG_EMBED_DIM:=384}"
+# Empty = let SentenceTransformers auto-select (CUDA if the GPU image + driver are present).
+: "${RAG_EMBED_DEVICE:=}"
 : "${RAG_INDEX_BACKEND:=local}"
 : "${PORT:=8080}"
-export RAG_INDEX_PATH RAG_STATE_PATH RAG_EMBED_PROVIDER RAG_HF_MODEL RAG_EMBED_DIM RAG_INDEX_BACKEND
+export RAG_INDEX_PATH RAG_STATE_PATH RAG_EMBED_PROVIDER RAG_HF_MODEL RAG_EMBED_DIM RAG_EMBED_DEVICE RAG_INDEX_BACKEND
 
 if [ -n "${RAG_KB_DIR:-}" ] && { [ ! -f "$RAG_INDEX_PATH" ] || [ -n "${RAG_REINDEX:-}" ]; }; then
   mkdir -p "$out_dir"
@@ -29,6 +31,7 @@ if [ -n "${RAG_KB_DIR:-}" ] && { [ ! -f "$RAG_INDEX_PATH" ] || [ -n "${RAG_REIND
     --embed-provider "$RAG_EMBED_PROVIDER" \
     --hf-model "$RAG_HF_MODEL" \
     --embed-dim "$RAG_EMBED_DIM" \
+    ${RAG_EMBED_DEVICE:+--embed-device "$RAG_EMBED_DEVICE"} \
     --index-backend "$RAG_INDEX_BACKEND"
 fi
 

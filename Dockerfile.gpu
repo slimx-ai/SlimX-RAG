@@ -1,0 +1,41 @@
+# GPU variant of the SlimX-RAG service image: identical to the default Dockerfile except
+# torch is installed from the CUDA wheel index so the `hf` embedder can run on an NVIDIA
+# GPU. The CUDA wheels bundle their own CUDA runtime, so the base stays python:3.12-slim;
+# the host only needs a recent NVIDIA driver + the NVIDIA Container Toolkit (the runtime
+# attaches the GPU). Published as `slimx-rag:latest-gpu`; the default CPU image is unchanged.
+#
+# Build:  docker build -f Dockerfile.gpu -t slimx-rag:latest-gpu .
+# Run:    docker run --gpus all -e RAG_EMBED_PROVIDER=hf -e RAG_EMBED_DEVICE=cuda ... slimx-rag:latest-gpu
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# git: required to install the `slimx` package from its git repo below.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY examples ./examples
+
+# CUDA torch (vs the CPU wheel in Dockerfile) so sentence-transformers can use the GPU when
+# RAG_EMBED_DEVICE=cuda; then install the hf extra and slimx. cu124 matches recent drivers.
+RUN uv pip install --system --index-url https://download.pytorch.org/whl/cu124 torch \
+  && uv pip install --system ".[demo,openai,qdrant,hf]" \
+  && uv pip install --system "slimx @ git+https://github.com/slimx-ai/slimx.git"
+
+# Bake the default hf embedding model so the served image needs no network at runtime.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+EXPOSE 8080
+# Same turnkey build-then-serve entrypoint as the CPU image; set RAG_EMBED_DEVICE=cuda to
+# embed on the GPU (defaults to auto-select if unset).
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

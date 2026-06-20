@@ -47,13 +47,70 @@ def _index_settings() -> IndexSettings:
     )
 
 
+_EMBED_OVERRIDE_FILENAME = "embed_override.json"
+
+
+def _embed_override_path() -> Path:
+    # Persist alongside the index (on the same volume) so an applied embedding choice
+    # survives restarts. Written by POST /api/admin/embedding.
+    return _index_path().parent / _EMBED_OVERRIDE_FILENAME
+
+
+def _load_embed_override() -> dict[str, Any]:
+    try:
+        data = json.loads(_embed_override_path().read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _embed_settings() -> EmbedSettings:
+    # Env supplies defaults; a persisted override (set at runtime via the admin endpoint)
+    # wins so ControlRoom can switch the embedding model/device without an image change.
+    override = _load_embed_override()
+    dim = override.get("dim")
     return EmbedSettings(
-        provider=os.getenv("RAG_EMBED_PROVIDER", "hash"),
-        model=os.getenv("RAG_EMBED_MODEL", "text-embedding-3-small"),
-        hf_model=os.getenv("RAG_HF_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
-        dim=int(os.getenv("RAG_EMBED_DIM", "384")),
+        provider=override.get("provider") or os.getenv("RAG_EMBED_PROVIDER", "hash"),
+        model=override.get("model") or os.getenv("RAG_EMBED_MODEL", "text-embedding-3-small"),
+        hf_model=override.get("hf_model")
+        or os.getenv("RAG_HF_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+        dim=int(dim if dim is not None else os.getenv("RAG_EMBED_DIM", "384")),
+        device=override["device"] if "device" in override else (os.getenv("RAG_EMBED_DEVICE") or None),
     )
+
+
+def _write_embed_override(settings: EmbedSettings) -> None:
+    path = _embed_override_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "provider": settings.provider,
+                "model": settings.model,
+                "hf_model": settings.hf_model,
+                "dim": settings.dim,
+                "device": settings.device,
+            }
+        ),
+        "utf-8",
+    )
+
+
+def _reset_index() -> None:
+    """Drop the on-disk index so the next ingest rebuilds it under the new embedding.
+
+    Changing the embedding model/dim changes the vector space, so the existing index is
+    invalid and must be rebuilt. This resets the local index + state files (the default and
+    GPU-image backend); remote backends (qdrant/pgvector) expose no truncate primitive here,
+    so those deployments must be rebuilt externally.
+    """
+    with _index_lock:
+        for p in (_index_path(), _state_path()):
+            try:
+                p.unlink()
+            except (FileNotFoundError, OSError):
+                pass
+        _reset_index_cache()
 
 
 def _chunk_settings() -> ChunkSettings:
@@ -118,6 +175,16 @@ class IndexRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class EmbeddingConfigRequest(BaseModel):
+    # All optional; omitted fields keep the current value. Setting any of these changes the
+    # vector space, so the index is reset and must be rebuilt by re-indexing documents.
+    provider: str | None = None
+    model: str | None = None
+    hf_model: str | None = None
+    dim: int | None = Field(default=None, gt=0)
+    device: str | None = None
+
+
 app = FastAPI(title="SlimX-RAG Research Demo")
 
 # One hot, in-process index shared by all requests. retrieve() otherwise re-reads and
@@ -177,6 +244,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "index_backend": _index_settings().backend,
         "embed_provider": _embed_settings().provider,
+        "embed_device": _embed_settings().device,
         "llm_model": os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
     }
 
@@ -195,8 +263,46 @@ def config(authorization: str | None = Header(default=None)) -> dict[str, Any]:
             "provider": _embed_settings().provider,
             "model": _embed_settings().model,
             "hf_model": _embed_settings().hf_model,
+            "device": _embed_settings().device,
         },
         "llm_model": os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
+    }
+
+
+@app.post("/api/admin/embedding")
+def set_embedding(
+    payload: EmbeddingConfigRequest, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
+    """Set the active embedding config and reset the index (guarded by the demo token).
+
+    Switching the embedding model/device changes the vector space, so the index is reset
+    here; the caller (ControlRoom) must then re-index its documents under the new embedding.
+    The choice is persisted alongside the index, so it survives a restart.
+    """
+    _check_token(authorization)
+    current = _embed_settings()
+    merged = EmbedSettings(
+        provider=payload.provider or current.provider,
+        model=payload.model or current.model,
+        hf_model=payload.hf_model or current.hf_model,
+        dim=payload.dim or current.dim,
+        device=payload.device if payload.device is not None else current.device,
+    )
+    try:
+        merged.validate()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _write_embed_override(merged)
+    _reset_index()
+    return {
+        "embed": {
+            "provider": merged.provider,
+            "model": merged.model,
+            "hf_model": merged.hf_model,
+            "dim": merged.dim,
+            "device": merged.device,
+        },
+        "index_reset": True,
     }
 
 

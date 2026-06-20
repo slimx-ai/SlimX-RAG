@@ -82,7 +82,7 @@ class OpenAIEmbedder(Embedder):
 class HuggingFaceEmbedder(Embedder):
     """HuggingFace/SentenceTransformers embeddings (optional dependency)."""
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, device: str | None = None):
         try:
             from sentence_transformers import SentenceTransformer  # type: ignore
         except Exception as e:  # pragma: no cover
@@ -90,7 +90,8 @@ class HuggingFaceEmbedder(Embedder):
                 "HuggingFaceEmbedder requires optional dependency 'sentence-transformers'. "
                 "Install extras (e.g. `uv sync --extra hf`)."
             ) from e
-        self._model = SentenceTransformer(model)
+        # device=None lets SentenceTransformers auto-select (CUDA if available, else CPU).
+        self._model = SentenceTransformer(model, device=device)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         # returns numpy array; convert to list of lists
@@ -104,7 +105,7 @@ def make_embedder(settings: EmbedSettings) -> Embedder:
     if settings.provider == "openai":
         return OpenAIEmbedder(model=settings.model)
     if settings.provider == "hf":
-        return HuggingFaceEmbedder(model=settings.hf_model)
+        return HuggingFaceEmbedder(model=settings.hf_model, device=settings.device)
     raise ValueError(f"Unknown embed provider: {settings.provider}")
 
 

@@ -42,6 +42,8 @@ def test_health_returns_config_summary(client: TestClient) -> None:
     assert body["status"] == "ok"
     assert body["index_backend"] == "local"
     assert body["embed_provider"] == "hash"
+    # device defaults to None (auto-select) when RAG_EMBED_DEVICE is unset
+    assert body["embed_device"] is None
 
 
 def test_config_endpoint(client: TestClient) -> None:
@@ -50,6 +52,14 @@ def test_config_endpoint(client: TestClient) -> None:
     body = res.json()
     assert body["index"]["backend"] == "local"
     assert body["embed"]["provider"] == "hash"
+    assert body["embed"]["device"] is None
+
+
+def test_health_reports_configured_embed_device(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RAG_EMBED_DEVICE", "cuda")
+    assert client.get("/health").json()["embed_device"] == "cuda"
 
 
 def test_retrieve_returns_citations(client: TestClient) -> None:
@@ -249,3 +259,41 @@ def test_scoped_retrieve_on_unsupported_backend_returns_400(
 
     # Unscoped retrieval still works against the same backend (guard not triggered).
     assert client.post("/api/retrieve", json={"question": "x"}).status_code == 200
+
+
+# --- admin: set embedding + reset index -------------------------------------------
+def test_set_embedding_resets_index_and_persists(ingest_client: TestClient) -> None:
+    ingest_client.post(
+        "/api/index", json={"workspace_id": "ws1", "document_id": "d1", "text": "alpha beta gamma"}
+    )
+    assert "alpha" in _texts(
+        ingest_client.post("/api/retrieve", json={"question": "alpha", "top_k": 5}).json()
+    )
+
+    res = ingest_client.post(
+        "/api/admin/embedding", json={"provider": "hash", "dim": 16, "device": "cuda"}
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["index_reset"] is True
+    assert body["embed"]["device"] == "cuda"
+
+    # The choice persists (read back via /api/config) and the index was discarded: a fresh
+    # ingest rebuilds from scratch, so the old document is gone.
+    assert ingest_client.get("/api/config").json()["embed"]["device"] == "cuda"
+    ingest_client.post(
+        "/api/index", json={"workspace_id": "ws1", "document_id": "d2", "text": "omega omega"}
+    )
+    after = _texts(ingest_client.post("/api/retrieve", json={"question": "x", "top_k": 50}).json())
+    assert "omega" in after and "alpha" not in after
+
+
+def test_set_embedding_requires_token_when_configured(
+    ingest_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEMO_AUTH_TOKEN", "secret")
+    assert ingest_client.post("/api/admin/embedding", json={"device": "cuda"}).status_code == 401
+    ok = ingest_client.post(
+        "/api/admin/embedding", json={"device": "cuda"}, headers={"Authorization": "Bearer secret"}
+    )
+    assert ok.status_code == 200

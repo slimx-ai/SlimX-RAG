@@ -56,10 +56,16 @@ class EmbedSettings:
     retry_backoff_s: float = 1.0
     normalize_text: bool = True
     max_chars: int | None = None
+    # Torch device for the local `hf` embedder (e.g. "cpu", "cuda", "cuda:0", "mps").
+    # None lets SentenceTransformers auto-select. Ignored by `hash`/`openai` so the
+    # deterministic offline default never depends on hardware.
+    device: str | None = None
 
     def validate(self) -> None:
         if self.provider not in set(EMBED_PROVIDERS):
             raise ValueError(f"embed.provider must be one of: {', '.join(EMBED_PROVIDERS)}")
+        if self.device is not None and not self.device.strip():
+            raise ValueError("embed.device must be a non-empty device string when set")
         if self.batch_size <= 0:
             raise ValueError("embed.batch_size must be > 0")
         if self.retries < 1:

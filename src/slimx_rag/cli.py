@@ -188,6 +188,7 @@ def _embed_settings_from_state_with_overrides(
     batch_size: int | None,
     max_chars: int | None,
     normalize_text: bool | None,
+    device: str | None = None,
 ) -> EmbedSettings:
     """
     Query-time embedding settings:
@@ -218,6 +219,8 @@ def _embed_settings_from_state_with_overrides(
         kwargs["max_chars"] = None if int(max_chars) == 0 else int(max_chars)
     if normalize_text is not None:
         kwargs["normalize_text"] = bool(normalize_text)
+    if device is not None:
+        kwargs["device"] = device
 
     # normalize types that may come back as strings in state
     if kwargs.get("dim") is not None:
@@ -292,6 +295,7 @@ def handle_index(args: argparse.Namespace) -> int:
         batch_size=args.embed_batch,
         max_chars=(None if args.embed_max_chars == 0 else int(args.embed_max_chars)),
         normalize_text=not args.embed_no_normalize,
+        device=getattr(args, "embed_device", None),
     )
     embed_settings.validate()
 
@@ -337,6 +341,7 @@ def handle_run(args: argparse.Namespace) -> int:
         batch_size=args.embed_batch,
         max_chars=(None if args.embed_max_chars == 0 else int(args.embed_max_chars)),
         normalize_text=not args.embed_no_normalize,
+        device=getattr(args, "embed_device", None),
     )
     index_settings = IndexSettings(
         backend=args.index_backend,
@@ -451,6 +456,7 @@ def handle_query(args: argparse.Namespace) -> int:
         batch_size=args.embed_batch,
         max_chars=args.embed_max_chars,
         normalize_text=args.embed_normalize,
+        device=getattr(args, "embed_device", None),
     )
 
     emb = make_embedder(embed_settings)
@@ -477,6 +483,7 @@ def _make_embed_settings_for_query(args: argparse.Namespace, idx_state_embed: di
         batch_size=args.embed_batch,
         max_chars=args.embed_max_chars,
         normalize_text=args.embed_normalize,
+        device=getattr(args, "embed_device", None),
     )
 
 
@@ -613,6 +620,12 @@ def _add_embed_args_indexing(p: argparse.ArgumentParser) -> None:
     g.add_argument("--embed-batch", type=int, default=d.batch_size)
     g.add_argument("--embed-max-chars", type=int, default=(d.max_chars or 0), help="0 disables")
     g.add_argument("--embed-no-normalize", action="store_true")
+    g.add_argument(
+        "--embed-device",
+        type=str,
+        default=d.device,
+        help="Torch device for the hf embedder (cpu/cuda/cuda:0/mps); default auto-selects",
+    )
 
 
 def _add_embed_overrides_query(p: argparse.ArgumentParser) -> None:
@@ -624,6 +637,7 @@ def _add_embed_overrides_query(p: argparse.ArgumentParser) -> None:
     g.add_argument("--embed-dim", type=int, default=None)
     g.add_argument("--embed-batch", type=int, default=None)
     g.add_argument("--embed-max-chars", type=int, default=None, help="0 disables; if omitted uses state/defaults")
+    g.add_argument("--embed-device", type=str, default=None, help="Override hf embedder device")
 
     norm = g.add_mutually_exclusive_group()
     norm.add_argument("--embed-normalize", dest="embed_normalize", action="store_true", default=None)
