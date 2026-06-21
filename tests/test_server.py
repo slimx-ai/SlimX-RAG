@@ -201,6 +201,46 @@ def test_retrieve_scopes_by_workspace_and_document(ingest_client: TestClient) ->
     assert none_match["chunks"] == []
 
 
+# --- chunk listing (/api/documents/{id}/chunks) -----------------------------------
+def test_document_chunks_lists_indexed_chunks_in_order(ingest_client: TestClient) -> None:
+    text = "alpha beta gamma. " * 80  # long enough to split into several chunks
+    ingest = ingest_client.post(
+        "/api/index", json={"workspace_id": "ws1", "document_id": "doc1", "text": text}
+    ).json()
+
+    res = ingest_client.get("/api/documents/doc1/chunks", params={"workspace_id": "ws1"})
+    assert res.status_code == 200
+    body = res.json()
+    # One entry per indexed chunk, contiguous ordinals starting at 0, text present.
+    assert body["chunk_count"] == ingest["chunk_count"]
+    assert [c["ordinal"] for c in body["chunks"]] == list(range(body["chunk_count"]))
+    assert all(c["text"] for c in body["chunks"])
+    assert all(c["chunk_id"] for c in body["chunks"])
+
+
+def test_document_chunks_unknown_document_is_empty_not_404(ingest_client: TestClient) -> None:
+    res = ingest_client.get("/api/documents/missing/chunks", params={"workspace_id": "ws1"})
+    assert res.status_code == 200
+    assert res.json() == {
+        "document_id": "missing",
+        "doc_id": res.json()["doc_id"],
+        "chunk_count": 0,
+        "chunks": [],
+    }
+
+
+def test_document_chunks_scoped_by_workspace(ingest_client: TestClient) -> None:
+    ingest_client.post(
+        "/api/index", json={"workspace_id": "wsA", "document_id": "dA", "text": "alpha beta gamma delta."}
+    )
+    # Same document_id under a different workspace resolves to a different doc identity,
+    # so listing it under the wrong workspace returns nothing.
+    wrong_ws = ingest_client.get("/api/documents/dA/chunks", params={"workspace_id": "wsB"})
+    assert wrong_ws.json()["chunk_count"] == 0
+    right_ws = ingest_client.get("/api/documents/dA/chunks", params={"workspace_id": "wsA"})
+    assert right_ws.json()["chunk_count"] >= 1
+
+
 # --- index caching + scoping guard ------------------------------------------------
 def test_retrieve_reuses_cached_index_until_file_changes(
     client: TestClient, monkeypatch: pytest.MonkeyPatch

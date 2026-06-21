@@ -393,6 +393,49 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
     }
 
 
+@app.get("/api/documents/{document_id}/chunks")
+def document_chunks_endpoint(
+    document_id: str,
+    workspace_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """List one document's indexed chunks in order, for inspection (not retrieval).
+
+    The document's chunk ids are recorded in IndexState at ingest time (in chunk order);
+    we read each chunk's text + metadata back from the live backend. Identity is derived
+    from workspace_id/document_id exactly as ``/api/index`` derives it, so a caller that
+    indexed a document can list its chunks. Unknown / not-yet-indexed documents return an
+    empty list (chunk_count 0) rather than a 404 — chunk listing is a best-effort view.
+    """
+    _check_token(authorization)
+    doc_id = path_id(f"{workspace_id}/{document_id}")
+    with _index_lock:
+        backend = _current_backend()
+        entry = backend.state.docs.get(doc_id) or {}
+        chunk_ids = [str(c) for c in (entry.get("chunk_ids") or [])]
+        stored = backend.get_chunks(chunk_ids)
+    chunks: list[dict[str, Any]] = []
+    for ordinal, sc in enumerate(stored):
+        md = sc.metadata or {}
+        chunks.append(
+            {
+                "chunk_id": sc.chunk_id,
+                "ordinal": ordinal,
+                "text": sc.text,
+                "page": md.get("page"),
+                "section": md.get("section") or md.get("title"),
+                "start_offset": md.get("start_offset"),
+                "end_offset": md.get("end_offset"),
+            }
+        )
+    return {
+        "document_id": document_id,
+        "doc_id": doc_id,
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+    }
+
+
 @app.post("/api/ask")
 def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)

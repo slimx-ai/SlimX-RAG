@@ -144,6 +144,19 @@ class LocalJsonlIndexBackend(IndexBackend):
             self._dirty = True
         return written
 
+    def get_chunks(self, chunk_ids: Iterable[str]) -> list[SearchResult]:
+        # Read stored text + metadata back for inspection (no vector search). Preserve the
+        # caller's order (the document's chunk order, as recorded in IndexState) and skip
+        # ids that are no longer in the index.
+        results: list[SearchResult] = []
+        for cid in chunk_ids:
+            item = self._items.get(cid)
+            if item is None:
+                continue
+            _vec, _norm, txt, md = item
+            results.append(SearchResult(chunk_id=cid, score=0.0, text=txt, metadata=md))
+        return results
+
     def query(self, query_vector: list[float], *, top_k: int | None = None) -> list[SearchResult]:
         if self._dim is not None and len(query_vector) != self._dim:
             raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {self._dim}")

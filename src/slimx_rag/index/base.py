@@ -55,6 +55,17 @@ class IndexBackend(ABC):
         """Optional: some backends can report number of chunks (best-effort)."""
         return 0
 
+    def get_chunks(self, chunk_ids: Iterable[str]) -> list[SearchResult]:
+        """Return stored chunks (text + metadata) for the given ids, in the requested order.
+
+        For *inspection* (e.g. listing a document's chunks), not retrieval — the returned
+        ``SearchResult.score`` is unused (0.0). Unknown ids are skipped. Best-effort and
+        backend-specific: backends that hold their chunks in memory (the local backend)
+        implement this; remote/ANN backends may not be able to read text back and return
+        ``[]`` by default rather than reimplementing storage here.
+        """
+        return []
+
     @property
     def dim(self) -> int | None:
         return self._dim
