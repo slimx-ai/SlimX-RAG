@@ -157,6 +157,10 @@ class LocalJsonlIndexBackend(IndexBackend):
             results.append(SearchResult(chunk_id=cid, score=0.0, text=txt, metadata=md))
         return results
 
+    def iter_chunks(self) -> Iterable[tuple[str, str, dict[str, object]]]:
+        for cid, (_vec, _norm, txt, md) in self._items.items():
+            yield cid, txt, md
+
     def query(self, query_vector: list[float], *, top_k: int | None = None) -> list[SearchResult]:
         if self._dim is not None and len(query_vector) != self._dim:
             raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {self._dim}")

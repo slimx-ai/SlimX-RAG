@@ -3,22 +3,35 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
 from slimx_rag.answer import answer
-from slimx_rag.chunk import chunk_documents
+from slimx_rag.chunk import chunk_documents, chunk_parsed_document
 from slimx_rag.core.hashing import content_hash, path_id
-from slimx_rag.embed import EmbeddedChunk, embed_chunks
+from slimx_rag.document import DocumentError, DocumentSource, parse_document
+from slimx_rag.embed import EmbeddedChunk, embed_chunks, get_cached_embedder, make_token_counter
 from slimx_rag.eval import load_eval_cases, run_eval
 from slimx_rag.index import IndexBackend, make_index_backend
-from slimx_rag.retrieval import ScopeNotSupportedError, retrieve
-from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexSettings
+from slimx_rag.index.types import SearchResult
+from slimx_rag.retrieval import Bm25Index, ChunkRecord, HybridRetriever, ScopeNotSupportedError, retrieve
+from slimx_rag.settings import (
+    ChunkSettings,
+    EmbedSettings,
+    IndexSettings,
+    RetrievalSettings,
+    StructuredChunkSettings,
+)
+
+# Bounded limits for the file-indexing endpoint (all tunable via env).
+MAX_FILE_BYTES = int(os.getenv("RAG_MAX_FILE_BYTES", str(25 * 1024 * 1024)))
+MAX_ELEMENTS = int(os.getenv("RAG_MAX_ELEMENTS", "20000"))
 
 
 def _backend_config() -> dict[str, object]:
@@ -70,10 +83,12 @@ def _embed_settings() -> EmbedSettings:
     override = _load_embed_override()
     dim = override.get("dim")
     return EmbedSettings(
-        provider=override.get("provider") or os.getenv("RAG_EMBED_PROVIDER", "hash"),
-        model=override.get("model") or os.getenv("RAG_EMBED_MODEL", "text-embedding-3-small"),
-        hf_model=override.get("hf_model")
-        or os.getenv("RAG_HF_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+        provider=str(override.get("provider") or os.getenv("RAG_EMBED_PROVIDER", "hash")),
+        model=str(override.get("model") or os.getenv("RAG_EMBED_MODEL", "text-embedding-3-small")),
+        hf_model=str(
+            override.get("hf_model")
+            or os.getenv("RAG_HF_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+        ),
         dim=int(dim if dim is not None else os.getenv("RAG_EMBED_DIM", "384")),
         device=override["device"] if "device" in override else (os.getenv("RAG_EMBED_DEVICE") or None),
     )
@@ -119,6 +134,109 @@ def _chunk_settings() -> ChunkSettings:
         chunk_size=int(os.getenv("RAG_CHUNK_SIZE", str(defaults.chunk_size))),
         chunk_overlap=int(os.getenv("RAG_CHUNK_OVERLAP", str(defaults.chunk_overlap))),
     )
+
+
+def _structured_chunk_settings() -> StructuredChunkSettings:
+    defaults = StructuredChunkSettings()
+    return StructuredChunkSettings(
+        target_tokens=int(os.getenv("RAG_TARGET_TOKENS", str(defaults.target_tokens))),
+        max_tokens=int(os.getenv("RAG_MAX_TOKENS", str(defaults.max_tokens))),
+    )
+
+
+def _retrieval_settings() -> RetrievalSettings:
+    defaults = RetrievalSettings()
+    return RetrievalSettings(
+        dense_candidates=int(os.getenv("RAG_DENSE_CANDIDATES", str(defaults.dense_candidates))),
+        lexical_candidates=int(os.getenv("RAG_LEXICAL_CANDIDATES", str(defaults.lexical_candidates))),
+        final_parents=int(os.getenv("RAG_FINAL_PARENTS", str(defaults.final_parents))),
+        enable_lexical=os.getenv("RAG_ENABLE_LEXICAL", "1").lower() not in ("0", "false", "no"),
+    )
+
+
+def _current_lexical(backend: IndexBackend) -> Bm25Index | None:
+    """Return the BM25 sidecar over the hot backend's corpus, rebuilt when it changes.
+
+    Returns None for backends that cannot enumerate their corpus (remote/ANN), so hybrid
+    retrieval truthfully falls back to dense-only rather than claiming a hybrid that did
+    not run.
+    """
+    global _lexical, _lexical_token
+    if not getattr(backend, "supports_inmemory_scope_filter", False):
+        return None
+    with _index_lock:
+        token = _cache_key()
+        if _lexical is None or _lexical_token != token:
+            _lexical = Bm25Index().build((cid, text) for cid, text, _md in backend.iter_chunks())
+            _lexical_token = token
+        return _lexical
+
+
+def _as_int(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _to_chunk_record(result: SearchResult) -> ChunkRecord:
+    md = result.metadata or {}
+    page = md.get("page")
+    return ChunkRecord(
+        chunk_id=result.chunk_id,
+        text=result.text,
+        parent_id=str(
+            md.get("parent_id") or md.get("parent_doc_id") or md.get("doc_id") or result.chunk_id
+        ),
+        page_number=page if isinstance(page, int) and not isinstance(page, bool) else None,
+        section=str(md["section"]) if md.get("section") is not None else None,
+        page_type=str(md.get("page_type") or "unknown"),
+        source_title=str(md.get("source_title") or md.get("title") or ""),
+        entry=str(md.get("entry") or ""),
+        token_count=_as_int(md.get("token_count")),
+    )
+
+
+def _chunks_to_documents(
+    chunks: list[Any],
+    *,
+    workspace_id: str,
+    document_id: str,
+    doc_id: str,
+    kb_relpath: str,
+    content_hash_value: str,
+) -> list[Document]:
+    """Map RetrievalChunks to embeddable Documents.
+
+    The identity-prefixed ``embedding_text`` is embedded and stored as the index text (so
+    lexical/exact matching see the entity), while the clean ``display_text`` and the
+    page/section/parent identity ride in metadata for citations and inspection.
+    """
+    docs: list[Document] = []
+    for ch in chunks:
+        docs.append(
+            Document(
+                page_content=ch.embedding_text,
+                metadata={
+                    "chunk_id": ch.chunk_id,
+                    "doc_id": doc_id,
+                    "kb_relpath": kb_relpath,
+                    "content_hash": content_hash_value,
+                    "workspace_id": workspace_id,
+                    "document_id": document_id,
+                    "parent_id": ch.parent_id,
+                    "page": ch.page_number,
+                    "section": ch.section,
+                    "section_path": list(ch.section_path),
+                    "page_type": ch.page_type.value,
+                    "entry": ch.metadata.get("entry", ""),
+                    "source_title": ch.source_title,
+                    "display_text": ch.display_text,
+                    "token_count": ch.token_count,
+                    "ordinal": ch.ordinal,
+                    "element_types": [t.value for t in ch.element_types],
+                    "forced_split": ch.forced_split,
+                },
+            )
+        )
+    return docs
 
 
 def _index_path() -> Path:
@@ -193,8 +311,15 @@ app = FastAPI(title="SlimX-RAG Research Demo")
 # external CLI rebuild). A single reentrant lock guards both the cached backend's in-memory
 # state and the read-modify-write ingest path, so reads never observe a half-applied write.
 _index_lock = threading.RLock()
+# A SEPARATE lock for embedding so embed work never blocks (or is blocked by) index
+# reads/writes. Embedding is the expensive step; keeping it off the index lock lets a
+# write's embedding run while reads proceed, while still serializing model use for safety.
+_embed_lock = threading.Lock()
 _backend: IndexBackend | None = None
 _backend_token: tuple[object, ...] | None = None
+# BM25 lexical sidecar, rebuilt when the index file changes (keyed by the same token).
+_lexical: Bm25Index | None = None
+_lexical_token: tuple[object, ...] | None = None
 
 
 def _index_token(path: Path) -> tuple[object, ...]:
@@ -231,11 +356,13 @@ def _mark_index_written() -> None:
 
 
 def _reset_index_cache() -> None:
-    """Drop the cached backend (used by tests; safe to call anytime)."""
-    global _backend, _backend_token
+    """Drop the cached backend + lexical sidecar (used by tests; safe to call anytime)."""
+    global _backend, _backend_token, _lexical, _lexical_token
     with _index_lock:
         _backend = None
         _backend_token = None
+        _lexical = None
+        _lexical_token = None
 
 
 @app.get("/health")
@@ -306,25 +433,135 @@ def set_embedding(
     }
 
 
+def _hybrid_retrieve_response(
+    payload: QuestionRequest, backend: IndexBackend, embed_settings: EmbedSettings
+) -> dict[str, Any]:
+    """Run multi-stage hybrid retrieval and shape the rich, inspectable response."""
+    started = time.perf_counter()
+    question = payload.question
+    scope_ws = str(payload.workspace_id) if payload.workspace_id else None
+    scope_docs = {str(d) for d in payload.document_ids} if payload.document_ids else None
+
+    def in_scope(md: dict[str, object]) -> bool:
+        if scope_ws is not None and str(md.get("workspace_id")) != scope_ws:
+            return False
+        if scope_docs is not None and str(md.get("document_id")) not in scope_docs:
+            return False
+        return True
+
+    # Embed the query once, OFF the index lock (and off any per-request model rebuild).
+    embedder = get_cached_embedder(embed_settings)
+    with _embed_lock:
+        qvec = [float(x) for x in embedder.embed_query(question)]
+
+    meta_cache: dict[str, dict[str, object]] = {}
+    record_cache: dict[str, ChunkRecord | None] = {}
+    settings = _retrieval_settings()
+
+    with _index_lock:
+        lexical = _current_lexical(backend)
+
+        def dense_search(_q: str, k: int) -> list[tuple[str, float]]:
+            if scope_ws or scope_docs:
+                raw = backend.query(qvec, top_k=len(backend) or k)
+                raw = [r for r in raw if in_scope(r.metadata or {})]
+            else:
+                raw = backend.query(qvec, top_k=k)
+            return [(r.chunk_id, float(r.score)) for r in raw[:k]]
+
+        def get_record(cid: str) -> ChunkRecord | None:
+            if cid in record_cache:
+                return record_cache[cid]
+            found = backend.get_chunks([cid])
+            rec: ChunkRecord | None = None
+            if found:
+                md = found[0].metadata or {}
+                if in_scope(md):  # scope enforced here: out-of-scope -> None -> dropped
+                    meta_cache[cid] = md
+                    rec = _to_chunk_record(found[0])
+            record_cache[cid] = rec
+            return rec
+
+        retriever = HybridRetriever(dense_search=dense_search, get_record=get_record, lexical=lexical)
+        results, trace = retriever.retrieve(question, settings=settings)
+
+    top_k = payload.top_k or _index_settings().top_k
+    if top_k:
+        results = results[:top_k]
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+    chunks_out: list[dict[str, Any]] = []
+    for r in results:
+        md = meta_cache.get(r.chunk_id, {})
+        chunks_out.append(
+            {
+                "chunk_id": r.chunk_id,
+                "score": r.fusion_score,
+                "text": md.get("display_text") or r.text,
+                "citation": r.citation(),
+                "metadata": {
+                    "document_id": md.get("document_id"),
+                    "workspace_id": md.get("workspace_id"),
+                    "parent_id": r.parent_id,
+                    "page": r.page_number,
+                    "section": r.section,
+                    "section_path": md.get("section_path"),
+                    "page_type": r.page_type,
+                    "entry": r.entry,
+                    "source_title": r.source_title,
+                    "token_count": r.token_count,
+                    "element_types": md.get("element_types"),
+                    "dense_rank": r.dense_rank,
+                    "dense_score": r.dense_score,
+                    "lexical_rank": r.lexical_rank,
+                    "lexical_score": r.lexical_score,
+                    "exact_match": r.exact_match,
+                    "exact_score": r.exact_score,
+                    "fusion_rank": r.fusion_rank,
+                    "rerank_score": r.rerank_score,
+                    "final_rank": r.final_rank,
+                    "parent_reason": r.parent_reason,
+                    "sibling_expanded": r.sibling_expanded,
+                },
+            }
+        )
+    model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
+    return {
+        "query": question,
+        "chunks": chunks_out,
+        "embed": {"provider": embed_settings.provider, "model": model, "dim": embed_settings.dim},
+        "elapsed_ms": elapsed_ms,
+        "retrieval_strategy": trace["strategy"],
+        "trace": trace,
+    }
+
+
 @app.post("/api/retrieve")
 def retrieve_endpoint(payload: QuestionRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
-    try:
-        with _index_lock:
-            result = retrieve(
-                payload.question,
-                index_path=_index_path(),
-                state_path=_state_path(),
-                embed_settings=_embed_settings(),
-                index_settings=_index_settings(),
-                top_k=payload.top_k,
-                workspace_id=payload.workspace_id,
-                document_ids=payload.document_ids,
-                backend=_current_backend(),
-            )
-    except ScopeNotSupportedError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return result.to_dict()
+    embed_settings = _embed_settings()
+    backend = _current_backend()
+    # Hybrid retrieval needs to enumerate the corpus (BM25) and read chunk metadata, which
+    # only the in-memory local backend supports. Remote/ANN backends use the legacy dense
+    # path (still enforcing scope or raising ScopeNotSupportedError).
+    if not getattr(backend, "supports_inmemory_scope_filter", False):
+        try:
+            with _index_lock:
+                result = retrieve(
+                    payload.question,
+                    index_path=_index_path(),
+                    state_path=_state_path(),
+                    embed_settings=embed_settings,
+                    index_settings=_index_settings(),
+                    top_k=payload.top_k,
+                    workspace_id=payload.workspace_id,
+                    document_ids=payload.document_ids,
+                    backend=backend,
+                )
+        except ScopeNotSupportedError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        return result.to_dict()
+    return _hybrid_retrieve_response(payload, backend, embed_settings)
 
 
 @app.post("/api/index")
@@ -390,6 +627,120 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
         "total": total,
         "vector_backend": index_settings.backend,
         "embed": {"provider": embed_settings.provider, "model": model, "dim": embed_settings.dim},
+    }
+
+
+@app.post("/api/index/file")
+def index_file_endpoint(
+    file: UploadFile = File(...),  # noqa: B008 — FastAPI dependency-injection default
+    workspace_id: str = Form(...),
+    document_id: str = Form(...),
+    filename: str | None = Form(default=None),
+    mime_type: str | None = Form(default=None),
+    title: str | None = Form(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Index an ORIGINAL file page-aware: parse -> structured chunk -> embed -> index.
+
+    Unlike ``/api/index`` (flattened text), this preserves PDF pages and DOCX/Markdown
+    structure so chunks stay self-describing. Parsing, chunking and embedding run OUTSIDE
+    the index mutation lock; only the delete/upsert/save/state section holds ``_index_lock``
+    (embedding holds the separate ``_embed_lock``). Errors are redacted (no document text).
+    """
+    _check_token(authorization)
+    raw = file.file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="empty file")
+    if len(raw) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail=f"file exceeds {MAX_FILE_BYTES} bytes")
+
+    embed_settings = _embed_settings()
+    source = DocumentSource(
+        document_id=document_id,
+        filename=filename or file.filename or document_id,
+        mime_type=mime_type,
+        content=raw,
+        workspace_id=workspace_id,
+        metadata={"title": title} if title else {},
+    )
+
+    timings: dict[str, int] = {}
+    t0 = time.perf_counter()
+    try:
+        parsed = parse_document(source)
+    except DocumentError as exc:
+        # Redacted: type only, never the document content.
+        raise HTTPException(status_code=422, detail=f"parse_failed: {type(exc).__name__}") from exc
+    timings["parse_ms"] = int((time.perf_counter() - t0) * 1000)
+    if parsed.element_count > MAX_ELEMENTS:
+        raise HTTPException(
+            status_code=413, detail=f"document has {parsed.element_count} elements; max {MAX_ELEMENTS}"
+        )
+
+    t1 = time.perf_counter()
+    token_counter = make_token_counter(embed_settings)
+    chunks = chunk_parsed_document(
+        parsed, settings=_structured_chunk_settings(), token_counter=token_counter
+    )
+    timings["chunk_ms"] = int((time.perf_counter() - t1) * 1000)
+
+    kb_relpath = f"{workspace_id}/{document_id}"
+    doc_id = path_id(kb_relpath)
+    ch_hash = content_hash("\n\n".join(p.text for p in parsed.pages))
+    docs = _chunks_to_documents(
+        chunks,
+        workspace_id=workspace_id,
+        document_id=document_id,
+        doc_id=doc_id,
+        kb_relpath=kb_relpath,
+        content_hash_value=ch_hash,
+    )
+
+    embedder = get_cached_embedder(embed_settings)
+    t2 = time.perf_counter()
+    with _embed_lock:  # embedding off the index lock
+        items: list[EmbeddedChunk] = list(
+            embed_chunks(iter(docs), settings=embed_settings, embedder=embedder)
+        )
+    timings["embed_ms"] = int((time.perf_counter() - t2) * 1000)
+
+    t3 = time.perf_counter()
+    with _index_lock:  # hold the lock ONLY for the protected delete/upsert/save/state section
+        idx = _current_backend()
+        idx.set_embed_config(embed_settings)
+        idx.delete_doc(doc_id)
+        upserted = idx.upsert(items, skip_existing=False)
+        idx.save()
+        _mark_index_written()
+        idx.commit_doc_state(doc_id, ch_hash, [it.chunk_id for it in items])
+        total = len(idx)
+        lexical_capable = bool(getattr(idx, "supports_inmemory_scope_filter", False))
+    timings["index_ms"] = int((time.perf_counter() - t3) * 1000)
+
+    model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
+    parent_count = len({str(d.metadata["parent_id"]) for d in docs})
+    return {
+        "status": "ready",
+        "document_id": document_id,
+        "doc_id": doc_id,
+        "rag_index_ref": f"slimx-rag:{doc_id}",
+        "parser": parsed.parser_name,
+        "parser_version": parsed.parser_version,
+        "source_type": parsed.source_type,
+        "page_count": parsed.page_count,
+        "element_count": parsed.element_count,
+        "parent_count": parent_count,
+        "chunk_count": len(items),
+        "upserted": upserted,
+        "total": total,
+        "embedding_provider": embed_settings.provider,
+        "embedding_model": model,
+        "embedding_dim": embedder.dim,
+        "embedding_max_seq_len": embedder.max_seq_length,
+        "vector_backend": _index_settings().backend,
+        "lexical_retrieval": lexical_capable,
+        "warnings": list(parsed.warnings),
+        "timings_ms": timings,
     }
 
 

@@ -33,6 +33,8 @@ answer = [
 demo = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
+  # Required by FastAPI to parse multipart/form-data for POST /api/index/file.
+  "python-multipart>=0.0.9",
 ]
 faiss = [
   "faiss-cpu>=1.7.4",
@@ -55,6 +57,9 @@ dev = [
   # Needed by tests/test_server.py (FastAPI TestClient uses httpx).
   "fastapi>=0.115",
   "httpx>=0.27",
+  # Multipart parsing for the file-indexing endpoint test.
+  "python-multipart>=0.0.9",
+  "pypdf>=5.0",
 ]
 
 [project.scripts]

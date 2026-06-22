@@ -66,6 +66,15 @@ class IndexBackend(ABC):
         """
         return []
 
+    def iter_chunks(self) -> Iterable[tuple[str, str, dict[str, object]]]:
+        """Yield (chunk_id, text, metadata) for all stored chunks.
+
+        Used to build the lexical (BM25) sidecar for hybrid retrieval. Only in-memory
+        backends that hold the corpus implement this; others return nothing and hybrid
+        retrieval reports ``strategy="dense"`` rather than falsely claiming hybrid.
+        """
+        return iter(())
+
     @property
     def dim(self) -> int | None:
         return self._dim
