@@ -90,12 +90,22 @@ class EmbedSettings:
     # None lets SentenceTransformers auto-select. Ignored by `hash`/`openai` so the
     # deterministic offline default never depends on hardware.
     device: str | None = None
+    # Vector-space knobs for the local `hf` embedder. These change the produced vectors,
+    # so they are part of the embedder cache key (see embed.get_cached_embedder).
+    # normalize_embeddings produces unit vectors (cosine == dot); query/document prefixes
+    # support asymmetric models (e.g. E5/BGE "query:" / "passage:"); revision pins weights.
+    normalize_embeddings: bool = True
+    query_prefix: str = ""
+    document_prefix: str = ""
+    revision: str | None = None
 
     def validate(self) -> None:
         if self.provider not in set(EMBED_PROVIDERS):
             raise ValueError(f"embed.provider must be one of: {', '.join(EMBED_PROVIDERS)}")
         if self.device is not None and not self.device.strip():
             raise ValueError("embed.device must be a non-empty device string when set")
+        if self.revision is not None and not self.revision.strip():
+            raise ValueError("embed.revision must be a non-empty string when set")
         if self.batch_size <= 0:
             raise ValueError("embed.batch_size must be > 0")
         if self.retries < 1:
