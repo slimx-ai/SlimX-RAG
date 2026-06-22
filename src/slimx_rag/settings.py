@@ -46,6 +46,36 @@ class ChunkSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class StructuredChunkSettings:
+    """Token-based, structure-aware chunking config (page/section parents).
+
+    Sizes are in embedding-tokenizer tokens, not characters. ``max_tokens`` is the hard
+    cap; at runtime the chunker clamps it to the embedding model's max sequence length so
+    a chunk can never silently exceed the model and be truncated. A small sliding overlap
+    is applied ONLY when an oversized, indivisible element must be force-split — normal
+    semantic chunks use no overlap.
+    """
+
+    target_tokens: int = 256
+    max_tokens: int = 512
+    force_split_overlap_tokens: int = 32
+    include_identity_prefix: bool = True
+    fallback: str = "recursive"  # strategy for unstructured plain text
+
+    def validate(self) -> None:
+        if self.target_tokens <= 0:
+            raise ValueError("structured_chunk.target_tokens must be > 0")
+        if self.max_tokens < self.target_tokens:
+            raise ValueError("structured_chunk.max_tokens must be >= target_tokens")
+        if not 0 <= self.force_split_overlap_tokens < self.target_tokens:
+            raise ValueError(
+                "structured_chunk.force_split_overlap_tokens must be in [0, target_tokens)"
+            )
+        if self.fallback not in {"recursive", "none"}:
+            raise ValueError("structured_chunk.fallback must be 'recursive' or 'none'")
+
+
+@dataclass(frozen=True, slots=True)
 class EmbedSettings:
     provider: str = "hash"  # hash | openai | hf
     dim: int = 384
