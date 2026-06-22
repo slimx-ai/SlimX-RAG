@@ -76,6 +76,40 @@ class StructuredChunkSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RetrievalSettings:
+    """Multi-stage hybrid retrieval configuration (dense + lexical + RRF + grouping).
+
+    Candidate counts are starting points to be tuned from measured results. Parent
+    grouping is mandatory; reranking is off by default (enable only on a measured gain).
+    """
+
+    dense_candidates: int = 30
+    lexical_candidates: int = 30
+    final_parents: int = 6
+    max_children_per_parent: int = 2
+    rrf_k: int = 60
+    exact_match_boost: float = 0.5
+    timeline_penalty: float = 0.5  # factor applied to timeline pages for factual intents
+    enable_lexical: bool = True
+    enable_rerank: bool = False
+
+    def validate(self) -> None:
+        for name, value in (
+            ("dense_candidates", self.dense_candidates),
+            ("lexical_candidates", self.lexical_candidates),
+            ("final_parents", self.final_parents),
+            ("max_children_per_parent", self.max_children_per_parent),
+            ("rrf_k", self.rrf_k),
+        ):
+            if value <= 0:
+                raise ValueError(f"retrieval.{name} must be > 0")
+        if not 0.0 <= self.timeline_penalty <= 1.0:
+            raise ValueError("retrieval.timeline_penalty must be in [0, 1]")
+        if self.exact_match_boost < 0:
+            raise ValueError("retrieval.exact_match_boost must be >= 0")
+
+
+@dataclass(frozen=True, slots=True)
 class EmbedSettings:
     provider: str = "hash"  # hash | openai | hf
     dim: int = 384

@@ -235,7 +235,12 @@ def _chunk_parent(
                 source_title=doc.title,
                 ordinal=ordinal,
                 forced_split=forced,
-                metadata={"parser": doc.parser_name, "parser_version": doc.parser_version},
+                metadata={
+                    "parser": doc.parser_name,
+                    "parser_version": doc.parser_version,
+                    "entry": parent.title,
+                    "page_type": parent.page_type.value,
+                },
             )
         )
         ordinal += 1
