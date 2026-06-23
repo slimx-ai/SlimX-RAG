@@ -195,3 +195,16 @@ class IndexBackend(ABC):
         """
         self.state.docs[doc_id] = {"content_hash": content_hash, "chunk_ids": list(chunk_ids)}
         self._save_state_if_enabled()
+
+    def forget_doc_state(self, doc_id: str) -> None:
+        """Drop one document's state entry and persist; the inverse of ``commit_doc_state``.
+
+        Pairs with ``delete_doc`` for a *permanent* removal: ``delete_doc`` deletes the
+        document's vectors, this forgets the ``doc_id -> chunk_ids`` bookkeeping so the
+        document is fully gone (unlike the index path, which re-commits the entry after
+        replacing chunks). Committed strictly after the backend save, like ``commit_doc_state``,
+        so a crash leaves at most a harmless stale state entry, never state ahead of the index.
+        """
+        if doc_id in self.state.docs:
+            del self.state.docs[doc_id]
+            self._save_state_if_enabled()

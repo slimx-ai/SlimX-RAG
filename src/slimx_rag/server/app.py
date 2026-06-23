@@ -787,6 +787,39 @@ def document_chunks_endpoint(
     }
 
 
+@app.delete("/api/documents/{document_id}")
+def delete_document_endpoint(
+    document_id: str,
+    workspace_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Permanently remove one document's chunks from the live index.
+
+    Identity is derived from workspace_id/document_id exactly as ``/api/index`` derives it,
+    so a caller that indexed a document can delete it. Idempotent: deleting an unknown /
+    already-deleted document is a no-op (``deleted_chunks`` 0), not a 404 — mirrors the
+    chunks endpoint. Reads and writes share one hot in-memory backend under ``_index_lock``,
+    so the next ``/api/retrieve`` no longer sees the chunks. State is committed strictly
+    after the backend save, the same crash-safety ordering as ``/api/index``.
+    """
+    _check_token(authorization)
+    doc_id = path_id(f"{workspace_id}/{document_id}")
+    with _index_lock:
+        idx = _current_backend()
+        deleted = idx.delete_doc(doc_id)  # drop this document's vectors; no-op when unknown
+        idx.save()
+        _mark_index_written()  # our own write must not trigger a reload on the next read
+        idx.forget_doc_state(doc_id)  # forget the doc -> chunk_ids bookkeeping (state last)
+        total = len(idx)
+    return {
+        "status": "deleted",
+        "document_id": document_id,
+        "doc_id": doc_id,
+        "deleted_chunks": deleted,
+        "total": total,
+    }
+
+
 @app.post("/api/ask")
 def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)

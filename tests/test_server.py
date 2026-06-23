@@ -337,3 +337,58 @@ def test_set_embedding_requires_token_when_configured(
         "/api/admin/embedding", json={"device": "cuda"}, headers={"Authorization": "Bearer secret"}
     )
     assert ok.status_code == 200
+
+
+# --- document deletion (DELETE /api/documents/{id}) -------------------------------
+def test_delete_document_removes_chunks_from_index(ingest_client: TestClient) -> None:
+    ingest_client.post(
+        "/api/index", json={"workspace_id": "ws1", "document_id": "docA", "text": "alpha alpha alpha."}
+    )
+    ingest_client.post(
+        "/api/index", json={"workspace_id": "ws1", "document_id": "docB", "text": "beta beta beta."}
+    )
+
+    res = ingest_client.delete("/api/documents/docA", params={"workspace_id": "ws1"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "deleted"
+    assert body["deleted_chunks"] >= 1
+
+    # docA's content is gone from retrieval; docB is untouched.
+    remaining = _texts(ingest_client.post("/api/retrieve", json={"question": "x", "top_k": 50}).json())
+    assert "alpha" not in remaining
+    assert "beta" in remaining
+    # Its chunk listing is now empty too (state entry forgotten, not just vectors dropped).
+    after = ingest_client.get("/api/documents/docA/chunks", params={"workspace_id": "ws1"})
+    assert after.json()["chunk_count"] == 0
+
+
+def test_delete_unknown_document_is_noop(ingest_client: TestClient) -> None:
+    res = ingest_client.delete("/api/documents/missing", params={"workspace_id": "ws1"})
+    assert res.status_code == 200
+    assert res.json()["deleted_chunks"] == 0
+
+
+def test_delete_document_is_workspace_scoped(ingest_client: TestClient) -> None:
+    ingest_client.post(
+        "/api/index", json={"workspace_id": "wsA", "document_id": "dA", "text": "alpha beta gamma."}
+    )
+    # Same document_id under a different workspace is a different doc identity -> no-op.
+    wrong = ingest_client.delete("/api/documents/dA", params={"workspace_id": "wsB"})
+    assert wrong.json()["deleted_chunks"] == 0
+    assert ingest_client.get("/api/documents/dA/chunks", params={"workspace_id": "wsA"}).json()["chunk_count"] >= 1
+    # Deleting under the right workspace removes it.
+    right = ingest_client.delete("/api/documents/dA", params={"workspace_id": "wsA"})
+    assert right.json()["deleted_chunks"] >= 1
+    assert ingest_client.get("/api/documents/dA/chunks", params={"workspace_id": "wsA"}).json()["chunk_count"] == 0
+
+
+def test_delete_document_is_idempotent(ingest_client: TestClient) -> None:
+    ingest_client.post(
+        "/api/index", json={"workspace_id": "ws1", "document_id": "doc1", "text": "alpha beta."}
+    )
+    first = ingest_client.delete("/api/documents/doc1", params={"workspace_id": "ws1"})
+    assert first.json()["deleted_chunks"] >= 1
+    second = ingest_client.delete("/api/documents/doc1", params={"workspace_id": "ws1"})
+    assert second.status_code == 200
+    assert second.json()["deleted_chunks"] == 0
