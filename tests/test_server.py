@@ -46,6 +46,41 @@ def test_health_returns_config_summary(client: TestClient) -> None:
     assert body["embed_device"] is None
 
 
+def test_ready_reports_deep_readiness(client: TestClient) -> None:
+    res = client.get("/ready")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ready"] is True
+    assert body["index_backend"] == "local"
+    assert body["embed_dim"] == 16  # matches the built index's embedder
+
+
+def test_ready_flags_embedding_dim_mismatch(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The built index stored dim 16; configuring a different embedder dim must be caught as
+    # not-ready (querying a dim-16 index with a dim-8 embedder would silently misbehave).
+    monkeypatch.setenv("RAG_EMBED_DIM", "8")
+    res = client.get("/ready")
+    assert res.status_code == 503
+    body = res.json()
+    assert body["ready"] is False
+    assert body["reason"] == "embedding_dim_mismatch"
+    assert body["stored_dim"] == 16 and body["embed_dim"] == 8
+
+
+def test_ready_reports_backend_failure_as_not_ready(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
+    appmod = importlib.import_module("slimx_rag.server.app")
+
+    def boom() -> object:
+        raise RuntimeError("backend exploded")
+
+    monkeypatch.setattr(appmod, "_current_backend", boom)
+    res = client.get("/ready")
+    assert res.status_code == 503
+    assert res.json()["reason"] == "backend_load_failed"
+
+
 def test_config_endpoint(client: TestClient) -> None:
     res = client.get("/api/config")
     assert res.status_code == 200

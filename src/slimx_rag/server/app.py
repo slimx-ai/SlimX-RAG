@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
@@ -374,6 +374,77 @@ def health() -> dict[str, Any]:
         "embed_device": _embed_settings().device,
         "llm_model": os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
     }
+
+
+@app.get("/ready")
+def ready(authorization: str | None = Header(default=None)) -> JSONResponse:
+    """Deep readiness: prove the service can actually index/retrieve, not just echo config.
+
+    Unlike the shallow ``/health`` liveness probe, this verifies the index output directory is
+    writable, the backend loads, and the embedder initializes, and it flags an embedding-
+    dimension mismatch between the existing index and the configured embedder. Returns 200
+    ``{"ready": true, ...}`` or 503 ``{"ready": false, "reason", ...}`` so a downstream app can
+    gate indexing on real readiness instead of liveness. Keep using ``/health`` for container
+    liveness.
+    """
+    _check_token(authorization)
+    index_settings = _index_settings()
+    embed_settings = _embed_settings()
+
+    def not_ready(reason: str, **extra: Any) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ready": False,
+                "reason": reason,
+                "index_backend": index_settings.backend,
+                **extra,
+            },
+        )
+
+    # 1. The index output directory must be writable (state + index files live here).
+    out_dir = _index_path().parent
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return not_ready("index_dir_unwritable", detail=type(exc).__name__)
+    if not os.access(out_dir, os.W_OK):
+        return not_ready("index_dir_unwritable")
+
+    # 2. The backend must load (report its current size + the index's stored embedding dim).
+    try:
+        with _index_lock:
+            backend = _current_backend()
+            index_count = len(backend)
+            stored_dim = (backend.state.embed or {}).get("dim")
+    except Exception as exc:  # noqa: BLE001 — readiness must surface a reason, never raise
+        return not_ready("backend_load_failed", detail=type(exc).__name__)
+
+    # 3. The embedder must initialize (loads + caches the model).
+    try:
+        embed_dim = get_cached_embedder(embed_settings).dim
+    except Exception as exc:  # noqa: BLE001
+        return not_ready("embedder_init_failed", detail=type(exc).__name__)
+
+    # 4. A populated index whose vectors don't match the configured embedder can't be queried
+    #    correctly — flag it so the caller reindexes rather than silently mixing dimensions.
+    if stored_dim and embed_dim and int(stored_dim) != int(embed_dim):
+        return not_ready(
+            "embedding_dim_mismatch", stored_dim=int(stored_dim), embed_dim=int(embed_dim)
+        )
+
+    model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
+    return JSONResponse(
+        status_code=200,
+        content={
+            "ready": True,
+            "index_backend": index_settings.backend,
+            "index_count": index_count,
+            "embed_provider": embed_settings.provider,
+            "embed_model": model,
+            "embed_dim": embed_dim,
+        },
+    )
 
 
 @app.get("/api/config")
