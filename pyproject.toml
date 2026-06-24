@@ -1,6 +1,6 @@
 [project]
 name = "slimx-rag"
-version = "0.1.1"
+version = "0.2.3"
 description = "SlimX-RAG: a slim, deterministic RAG indexing pipeline (ingest -> chunk -> embed -> index)."
 readme = "README.md"
 requires-python = ">=3.10"
