@@ -740,8 +740,12 @@ def index_file_endpoint(
     try:
         parsed = parse_document(source)
     except DocumentError as exc:
-        # Redacted: type only, never the document content.
-        raise HTTPException(status_code=422, detail=f"parse_failed: {type(exc).__name__}") from exc
+        # Surface the parser's failure-mode message (e.g. "requires the optional dependency
+        # 'pypdf'", "Could not read PDF: <ErrType>") so the caller can act. These messages
+        # describe the failure, never the document content, so they are safe to return.
+        raise HTTPException(
+            status_code=422, detail=f"parse_failed: {type(exc).__name__}: {exc}"
+        ) from exc
     timings["parse_ms"] = int((time.perf_counter() - t0) * 1000)
     if parsed.element_count > MAX_ELEMENTS:
         raise HTTPException(

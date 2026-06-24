@@ -24,10 +24,13 @@ COPY src ./src
 COPY examples ./examples
 
 # CUDA torch (vs the CPU wheel in Dockerfile) so sentence-transformers can use the GPU when
-# RAG_EMBED_DEVICE=cuda; then install the hf extra and slimx. cu124 matches recent drivers.
+# RAG_EMBED_DEVICE=cuda; then install the hf + doc extras and slimx. cu124 matches recent drivers.
+# The `doc` extra (pypdf, python-docx) is REQUIRED for page-aware PDF/DOCX ingest; the trailing
+# import check fails the build if those parser deps ever go missing again.
 RUN uv pip install --system --index-url https://download.pytorch.org/whl/cu124 torch \
-  && uv pip install --system ".[demo,openai,qdrant,hf]" \
-  && uv pip install --system "slimx @ git+https://github.com/slimx-ai/slimx.git"
+  && uv pip install --system ".[demo,openai,qdrant,hf,doc]" \
+  && uv pip install --system "slimx @ git+https://github.com/slimx-ai/slimx.git" \
+  && python -c "import pypdf, docx"
 
 # Bake the default hf embedding model so the served image needs no network at runtime.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"

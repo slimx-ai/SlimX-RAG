@@ -17,9 +17,13 @@ COPY examples ./examples
 
 # Install CPU-only torch first so the `hf` extra (sentence-transformers) doesn't pull
 # the multi-GB CUDA build, then install with the hf extra for local semantic embeddings.
+# The `doc` extra (pypdf, python-docx — lightweight, pure-Python) is REQUIRED for page-aware
+# PDF/DOCX ingest via /api/index/file; without it PdfParser raises DocumentParseError. The
+# trailing import check fails the build if those parsers' deps ever go missing again.
 RUN uv pip install --system --index-url https://download.pytorch.org/whl/cpu torch \
-  && uv pip install --system ".[demo,openai,qdrant,hf]" \
-  && uv pip install --system "slimx @ git+https://github.com/slimx-ai/slimx.git"
+  && uv pip install --system ".[demo,openai,qdrant,hf,doc]" \
+  && uv pip install --system "slimx @ git+https://github.com/slimx-ai/slimx.git" \
+  && python -c "import pypdf, docx"
 
 # Bake the default hf embedding model so the served image needs no network at runtime.
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
