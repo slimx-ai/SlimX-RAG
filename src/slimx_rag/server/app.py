@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -262,12 +263,25 @@ def _max_context_chars() -> int | None:
     return int(raw) if raw else None
 
 
+def _auth_token() -> str | None:
+    """The configured service token. ``RAG_AUTH_TOKEN`` is the canonical env name;
+    ``DEMO_AUTH_TOKEN`` remains supported as the deprecated legacy alias."""
+    return os.getenv("RAG_AUTH_TOKEN") or os.getenv("DEMO_AUTH_TOKEN")
+
+
+def _auth_enabled() -> bool:
+    return bool(_auth_token())
+
+
 def _check_token(authorization: str | None) -> None:
-    token = os.getenv("DEMO_AUTH_TOKEN")
+    token = _auth_token()
     if not token:
         return
-    if authorization != f"Bearer {token}":
-        raise HTTPException(status_code=401, detail="Missing or invalid demo token")
+    # Constant-time comparison: a plain `!=` short-circuits on the first differing byte and
+    # leaks token prefixes through response timing.
+    expected = f"Bearer {token}"
+    if authorization is None or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(status_code=401, detail="Missing or invalid service token")
 
 
 class QuestionRequest(BaseModel):
@@ -373,6 +387,9 @@ def health() -> dict[str, Any]:
         "embed_provider": _embed_settings().provider,
         "embed_device": _embed_settings().device,
         "llm_model": os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
+        # Whether this server enforces a bearer token. Lets a caller that *sends* a token
+        # detect a deployment where the server never received one (auth silently off).
+        "auth_enabled": _auth_enabled(),
     }
 
 
@@ -443,6 +460,8 @@ def ready(authorization: str | None = Header(default=None)) -> JSONResponse:
             "embed_provider": embed_settings.provider,
             "embed_model": model,
             "embed_dim": embed_dim,
+            # Mirrors /health: whether a bearer token is enforced (see _check_token).
+            "auth_enabled": _auth_enabled(),
         },
     )
 
