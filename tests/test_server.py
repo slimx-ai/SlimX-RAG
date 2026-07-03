@@ -31,6 +31,7 @@ def client(built_index: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("RAG_STATE_PATH", str(built_index / "index_state.json"))
     monkeypatch.setenv("RAG_EMBED_DIM", "16")
     monkeypatch.delenv("DEMO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("RAG_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("RAG_BACKEND_CONFIG", raising=False)
     return TestClient(app)
 
@@ -131,6 +132,31 @@ def test_auth_token_enforced_when_configured(client: TestClient, monkeypatch: py
     assert ok.status_code == 200
     # /health stays open for liveness probes
     assert client.get("/health").status_code == 200
+
+
+def test_rag_auth_token_is_the_canonical_env_and_wins_over_the_legacy_alias(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # RAG_AUTH_TOKEN is canonical; DEMO_AUTH_TOKEN remains a working legacy alias.
+    monkeypatch.setenv("RAG_AUTH_TOKEN", "newtoken")
+    monkeypatch.setenv("DEMO_AUTH_TOKEN", "oldtoken")
+
+    assert client.get("/api/config", headers={"Authorization": "Bearer oldtoken"}).status_code == 401
+    assert client.get("/api/config", headers={"Authorization": "Bearer newtoken"}).status_code == 200
+
+
+def test_health_and_ready_report_auth_enabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Off by default (no token configured).
+    assert client.get("/health").json()["auth_enabled"] is False
+
+    monkeypatch.setenv("RAG_AUTH_TOKEN", "secret")
+    assert client.get("/health").json()["auth_enabled"] is True
+    ready = client.get("/ready", headers={"Authorization": "Bearer secret"})
+    assert ready.status_code in (200, 503)
+    if ready.status_code == 200:
+        assert ready.json()["auth_enabled"] is True
 
 
 def test_bad_backend_config_env_returns_clean_500(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
