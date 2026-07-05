@@ -871,6 +871,12 @@ def document_chunks_endpoint(
                 "section": md.get("section") or md.get("title"),
                 "start_offset": md.get("start_offset"),
                 "end_offset": md.get("end_offset"),
+                # Richer inspection fields (already stored on chunk metadata) so ControlRoom's
+                # Document Reader can show structure/provenance, not just page/section.
+                "section_path": md.get("section_path"),
+                "parent_id": md.get("parent_id"),
+                "page_type": md.get("page_type"),
+                "token_count": md.get("token_count"),
             }
         )
     return {

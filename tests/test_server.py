@@ -277,6 +277,10 @@ def test_document_chunks_lists_indexed_chunks_in_order(ingest_client: TestClient
     assert [c["ordinal"] for c in body["chunks"]] == list(range(body["chunk_count"]))
     assert all(c["text"] for c in body["chunks"])
     assert all(c["chunk_id"] for c in body["chunks"])
+    # Inspection contract: the richer structure keys are always present (None for flat text ingest;
+    # populated for page-aware ingest) so ControlRoom's Document Reader can render them uniformly.
+    for key in ("section_path", "parent_id", "page_type", "token_count"):
+        assert all(key in c for c in body["chunks"])
 
 
 def test_document_chunks_unknown_document_is_empty_not_404(ingest_client: TestClient) -> None:
