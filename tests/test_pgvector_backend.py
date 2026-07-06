@@ -263,3 +263,38 @@ def test_pgvector_query_orders_equal_scores_by_chunk_id(monkeypatch, tmp_path):
 
     assert [r.chunk_id for r in idx.query([1.0, 0.0], top_k=3)] == ["c1", "c2", "c3"]
     assert "ORDER BY embedding <=> %s::vector, chunk_id ASC" in all_sql()
+
+
+def test_pgvector_wraps_metadata_in_jsonb_when_available(monkeypatch, tmp_path):
+    """Real psycopg cannot adapt a raw dict for the JSONB column
+    ("cannot adapt type 'dict'"); upsert must wrap metadata in
+    psycopg.types.json.Jsonb when the real driver is present."""
+    install_fake_psycopg(monkeypatch)
+
+    class FakeJsonb:
+        def __init__(self, obj):
+            self.obj = obj
+
+    types_mod = types.ModuleType("psycopg.types")
+    json_mod = types.ModuleType("psycopg.types.json")
+    json_mod.Jsonb = FakeJsonb
+    types_mod.json = json_mod
+    monkeypatch.setitem(sys.modules, "psycopg.types", types_mod)
+    monkeypatch.setitem(sys.modules, "psycopg.types.json", json_mod)
+
+    from slimx_rag.index.pgvector_backend import PgVectorIndexBackend
+
+    idx = PgVectorIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="pgvector", backend_config={"dsn": "postgresql://test/db"}),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+
+    idx.upsert([
+        EmbeddedChunk(chunk_id="c1", vector=[1.0, 0.0], text="A", metadata={"keep": 1}),
+    ])
+
+    stored = latest_connection().rows["c1"]["metadata"]
+    assert isinstance(stored, FakeJsonb)
+    assert stored.obj == {"keep": 1}

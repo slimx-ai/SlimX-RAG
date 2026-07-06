@@ -59,6 +59,16 @@ class PgVectorIndexBackend(IndexBackend):
                 "pgvector backend requires optional dependency. Install with: uv sync --extra pgvector"
             ) from e
 
+        # psycopg3 cannot adapt a raw dict for the JSONB column; metadata
+        # must be wrapped in Jsonb before executemany. Test doubles that
+        # stub `psycopg` without the types submodule fall back to the raw
+        # dict (their fake cursors accept anything).
+        try:
+            from psycopg.types.json import Jsonb  # type: ignore
+        except ImportError:
+            Jsonb = None
+        self._jsonb = Jsonb
+
         self._psycopg = psycopg
         self.state = IndexState.load(self.state_path)
 
@@ -141,7 +151,8 @@ class PgVectorIndexBackend(IndexBackend):
                 raise RuntimeError(f"Vector dim mismatch: expected {self._dim or expected_dim}, got {actual_dim}")
 
             md = self._apply_metadata_whitelist(dict(it.metadata))
-            rows.append((str(it.chunk_id), _vector_literal(vector), it.text, md))
+            payload = self._jsonb(md) if self._jsonb is not None else md
+            rows.append((str(it.chunk_id), _vector_literal(vector), it.text, payload))
 
         if not rows:
             return 0
