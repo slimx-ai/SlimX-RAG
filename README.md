@@ -93,6 +93,8 @@ Outputs:
 - `output/embeddings.jsonl` (vectors; default provider is offline `hash`)
 - `output/index.jsonl` (vector index records; for small corpora with the local backend)
 - `output/index_state.json` (embedding config and incremental index state)
+- `output/index_instance_id` (opaque persisted corpus instance identity)
+- `output/index_build_receipt.json` (canonical signature + pipeline for the successful build)
 - `output/manifest.json` (optional RAGOps build manifest when requested)
 
 ---
@@ -103,7 +105,8 @@ Outputs:
 The Docker image is **turnkey build-then-serve**: point it at a knowledge-base directory
 and it builds the index on first start (with the local `hf` sentence-transformers
 embedder, baked into the image — no network needed at runtime), then serves
-`/health`, `/api/retrieve`, `/api/ask`, and `/api/index` on port 8080.
+`/health`, `/ready`, `/api/retrieve`, `/api/ask`, `/api/index`, and
+`/api/index/file` on port 8080.
 
 `POST /api/index` `{workspace_id, document_id, text, metadata?}` ingests a single
 document into the live index (chunk → embed → upsert) so a downstream app can index
@@ -111,6 +114,17 @@ uploaded documents over HTTP instead of rebuilding from a KB dir. Identity is de
 from `workspace_id/document_id`, so re-posting the same document is idempotent and a
 content change replaces just that document's chunks. (Retrieval is still over one global
 index — `workspace_id`/`document_id` are stored in chunk metadata for future scoping.)
+
+Starting with v0.2.7, `/ready`, `/api/config`, and both indexing endpoints expose an
+additive `index_signature`. Its secret-free `compatibility_fingerprint` covers the
+persistent index instance, vector backend, effective embedding configuration, registered
+parser/extraction versions, sanitized backend corpus namespace, metadata shaping, both text
+and file chunking profiles (including the effective token cap/counter identity), and
+index/identity schema versions. Successful CLI and HTTP builds persist a canonical build
+receipt; `/api/config` serves that receipt without loading a model or contacting the index.
+Downstream applications should persist the successful indexing signature and compare its
+compatibility fingerprint with `/ready`; see
+[the index signature contract](docs/index-signature.md).
 
 ```bash
 # Build (or pull the published image: ghcr.io/slimx-ai/slimx-rag)
@@ -132,7 +146,12 @@ Or use the demo compose (builds the image, indexes the bundled corpus, serves):
 docker compose -f docker-compose.demo.yml up --build
 ```
 
-Set `RAG_REINDEX=1` to rebuild the index on start. Override the embedder via
+Set `RAG_REINDEX=1` to rebuild the index on start; the entrypoint passes `--reindex`,
+rotates the persisted instance identity, and replaces the build receipt. Custom
+`RAG_INDEX_PATH` and `RAG_STATE_PATH` values are passed verbatim to the build, including
+when index and state live on separate volumes. Verified automatic reindex is limited to
+local JSONL/FAISS; remote backends fail closed until their namespace is reset externally.
+Override the embedder via
 `RAG_EMBED_PROVIDER` (`hash` | `openai` | `hf`) and related `RAG_*` env. The image is
 published to `ghcr.io/slimx-ai/slimx-rag` by `.github/workflows/publish-image.yaml` on
 release; downstream apps consume that image (they do not build it).

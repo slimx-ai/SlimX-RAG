@@ -22,17 +22,29 @@ out_dir=$(dirname "$RAG_INDEX_PATH")
 : "${PORT:=8080}"
 export RAG_INDEX_PATH RAG_STATE_PATH RAG_EMBED_PROVIDER RAG_HF_MODEL RAG_EMBED_DIM RAG_EMBED_DEVICE RAG_INDEX_BACKEND
 
-if [ -n "${RAG_KB_DIR:-}" ] && { [ ! -f "$RAG_INDEX_PATH" ] || [ -n "${RAG_REINDEX:-}" ]; }; then
-  mkdir -p "$out_dir"
-  echo "[slimx-rag] indexing '$RAG_KB_DIR' -> '$out_dir' (provider=$RAG_EMBED_PROVIDER)"
-  slimx-rag run \
+build_index() {
+  set -- slimx-rag run \
     --kb-dir "$RAG_KB_DIR" \
     --out-dir "$out_dir" \
+    --index "$RAG_INDEX_PATH" \
+    --state "$RAG_STATE_PATH" \
     --embed-provider "$RAG_EMBED_PROVIDER" \
     --hf-model "$RAG_HF_MODEL" \
     --embed-dim "$RAG_EMBED_DIM" \
-    ${RAG_EMBED_DEVICE:+--embed-device "$RAG_EMBED_DEVICE"} \
     --index-backend "$RAG_INDEX_BACKEND"
+  if [ -n "$RAG_EMBED_DEVICE" ]; then
+    set -- "$@" --embed-device "$RAG_EMBED_DEVICE"
+  fi
+  if [ -n "${RAG_REINDEX:-}" ]; then
+    set -- "$@" --reindex
+  fi
+  "$@"
+}
+
+if [ -n "${RAG_KB_DIR:-}" ] && { [ ! -f "$RAG_INDEX_PATH" ] || [ -n "${RAG_REINDEX:-}" ]; }; then
+  mkdir -p "$out_dir"
+  echo "[slimx-rag] indexing '$RAG_KB_DIR' -> '$out_dir' (provider=$RAG_EMBED_PROVIDER)"
+  build_index
 fi
 
 if [ "$#" -eq 0 ]; then

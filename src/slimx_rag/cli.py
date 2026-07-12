@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
@@ -10,9 +11,18 @@ from typing import Any
 from slimx_rag.answer import answer
 from slimx_rag.chunk import chunk_documents
 from slimx_rag.diff import build_diff, format_diff_text
-from slimx_rag.embed import embed_chunks, make_embedder
+from slimx_rag.embed import EmbeddedChunk, embed_chunks, make_embedder
 from slimx_rag.eval import load_eval_cases, run_eval, write_eval_report
-from slimx_rag.index import make_index_backend
+from slimx_rag.index import (
+    INDEX_BUILD_RECEIPT_FILENAME,
+    INDEX_INSTANCE_ID_FILENAME,
+    build_index_signature,
+    load_index_build_receipt,
+    locked_index_instance,
+    make_index_backend,
+    resolve_embedding_dimension,
+    write_index_build_receipt,
+)
 from slimx_rag.ingest.loader import fetch_documents
 from slimx_rag.manifest import write_manifest
 from slimx_rag.report import build_report, format_report_markdown
@@ -25,6 +35,7 @@ from slimx_rag.settings import (
     IndexingPipelineSettings,
     IndexSettings,
     IngestSettings,
+    StructuredChunkSettings,
 )
 from slimx_rag.utils.commons import _read_jsonl_docs, _write_embeddings_jsonl, _write_jsonl
 
@@ -35,6 +46,7 @@ DEFAULTS = IndexingPipelineSettings()
 # =============================================================================
 # Small, reusable helpers (keep CLI readable, avoid duplication)
 # =============================================================================
+
 
 def _ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,7 +60,7 @@ def _parse_backend_config(raw: str) -> dict[str, object]:
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in --backend-config: {e}") from e
     if not isinstance(obj, dict):
-        raise ValueError("--backend-config must be a JSON object (e.g. {\"collection\": \"slimx\"})")
+        raise ValueError('--backend-config must be a JSON object (e.g. {"collection": "slimx"})')
     return obj
 
 
@@ -82,6 +94,7 @@ def _backend_uses_local_index_file(index_settings: IndexSettings) -> bool:
 # =============================================================================
 # Incremental state scan (kept explicit + well-documented)
 # =============================================================================
+
 
 def _scan_chunks_for_state(in_path: Path) -> dict[str, tuple[str, list[str]]]:
     """
@@ -138,6 +151,7 @@ def _scan_chunks_for_state(in_path: Path) -> dict[str, tuple[str, list[str]]]:
 # Core operation (so `index` and `run` share logic without mutating args)
 # =============================================================================
 
+
 def _index_chunks_file(
     *,
     in_chunks_path: Path,
@@ -147,6 +161,7 @@ def _index_chunks_file(
     state_path: Path | None,
     reindex: bool,
     embeddings_out_path: Path | None = None,
+    chunk_settings: ChunkSettings | None = None,
 ) -> tuple[int, int, int]:
     """
     Embed + upsert chunks, with incremental cleanup.
@@ -156,26 +171,126 @@ def _index_chunks_file(
     if not in_chunks_path.exists():
         raise FileNotFoundError(f"Input chunks file not found: {in_chunks_path}")
 
-    idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)
-    idx.load()
-    idx.set_embed_config(embed_settings)
+    chunk_settings = chunk_settings or ChunkSettings()
+    backend = (index_settings.backend or "local").lower().strip()
+    if reindex and backend not in {"local", "faiss"}:
+        raise RuntimeError(
+            f"--reindex cannot verify a full reset for backend {backend!r}; "
+            "reset its remote corpus namespace externally"
+        )
+    embedder = make_embedder(embed_settings)
+    token_counter = embedder.token_counter()
+    # Identity + receipt belong to the index volume. Keep this location identical to the
+    # HTTP service even when operators place incremental state on a separate path.
+    artifact_dir = index_path.parent
+    instance_path = artifact_dir / INDEX_INSTANCE_ID_FILENAME
+    receipt_path = artifact_dir / INDEX_BUILD_RECEIPT_FILENAME
 
-    current_docs = _scan_chunks_for_state(in_chunks_path)
-    deleted = idx.apply_incremental_plan(current_docs=current_docs)
+    with locked_index_instance(instance_path, create=True) as lease:
+        assert lease.instance_id is not None
+        idx = make_index_backend(index_path, settings=index_settings, state_path=state_path)
+        idx.load()
+        persisted_actual_dimension = (idx.state.embed or {}).get("actual_dim")
+        previous_receipt = load_index_build_receipt(receipt_path)
+        current_docs = _scan_chunks_for_state(in_chunks_path)
 
-    chunks_iter = _read_jsonl_docs(in_chunks_path)
-    items = embed_chunks(chunks_iter, settings=embed_settings)
-    if embeddings_out_path is not None:
-        materialized = list(items)
-        _write_embeddings_jsonl(materialized, embeddings_out_path)
-        items = iter(materialized)
-    written = idx.upsert(items, skip_existing=not reindex)
-    idx.save()
-    # Commit state strictly after a successful upsert + save: a crash earlier
-    # leaves state behind the backend (a re-run converges), never ahead of it.
-    idx.commit_state(current_docs)
+        if reindex:
+            lease.publish_new()
+            receipt_path.unlink(missing_ok=True)
+            previous_receipt = None
+        elif previous_receipt is None and (len(idx) > 0 or bool(idx.state.docs)):
+            if backend in {"local", "faiss"}:
+                raise RuntimeError("Existing index has no build receipt; rerun with --reindex")
+            raise RuntimeError("Existing remote index has no build receipt; reset its corpus namespace externally")
+        elif previous_receipt is not None and previous_receipt.index_signature.index_instance_id != lease.instance_id:
+            raise RuntimeError("Index build receipt does not match the persisted instance id")
 
-    return deleted, written, len(idx)
+        configured_dimension = resolve_embedding_dimension(
+            backend_dimension=idx.dim,
+            persisted_actual_dimension=persisted_actual_dimension,
+            configured_dimension=embedder.dim or embed_settings.dim,
+        )
+        configured_signature = build_index_signature(
+            index_settings=index_settings,
+            embed_settings=embed_settings,
+            chunk_settings=chunk_settings,
+            structured_chunk_settings=StructuredChunkSettings(),
+            embedding_dimension=configured_dimension,
+            index_instance_id=lease.instance_id,
+            structured_token_counter=token_counter,
+        )
+        if (
+            previous_receipt is not None
+            and previous_receipt.index_signature.compatibility_fingerprint
+            != configured_signature.compatibility_fingerprint
+        ):
+            if backend in {"local", "faiss"}:
+                raise RuntimeError("Index configuration changed; rerun with --reindex")
+            raise RuntimeError("Remote index configuration changed; reset its corpus namespace externally")
+
+        if reindex:
+            old_chunk_ids = {
+                str(chunk_id) for entry in idx.state.docs.values() for chunk_id in (entry.get("chunk_ids") or [])
+            }
+            old_chunk_ids.update(str(chunk_id) for chunk_id, _text, _metadata in idx.iter_chunks())
+            deleted = idx.delete(sorted(old_chunk_ids))
+            if len(idx) > 0:
+                raise RuntimeError("Could not fully clear the existing index for --reindex")
+        else:
+            deleted = idx.apply_incremental_plan(current_docs=current_docs)
+        chunks_iter = _read_jsonl_docs(in_chunks_path)
+        observed_dimension: int | None = None
+
+        def observe_dimensions(items: Iterable[EmbeddedChunk]) -> Iterator[EmbeddedChunk]:
+            nonlocal observed_dimension
+            for item in items:
+                dimension = len(item.vector)
+                if observed_dimension is None:
+                    observed_dimension = dimension
+                elif dimension != observed_dimension:
+                    raise RuntimeError("Embedding provider returned mixed vector dimensions")
+                yield item
+
+        items = observe_dimensions(embed_chunks(chunks_iter, settings=embed_settings, embedder=embedder))
+        if embeddings_out_path is not None:
+            materialized = list(items)
+            _write_embeddings_jsonl(materialized, embeddings_out_path)
+            items = iter(materialized)
+        written = idx.upsert(items, skip_existing=not reindex)
+        actual_dimension = resolve_embedding_dimension(
+            emitted_dimension=observed_dimension,
+            backend_dimension=idx.dim,
+            persisted_actual_dimension=persisted_actual_dimension,
+        )
+        idx.set_embed_config(embed_settings, dimension=actual_dimension)
+        idx.save()
+        # Commit state strictly after a successful upsert + save: a crash earlier
+        # leaves state behind the backend (a re-run converges), never ahead of it.
+        idx.commit_state(current_docs)
+
+        signature = build_index_signature(
+            index_settings=index_settings,
+            embed_settings=embed_settings,
+            chunk_settings=chunk_settings,
+            structured_chunk_settings=StructuredChunkSettings(),
+            embedding_dimension=resolve_embedding_dimension(
+                emitted_dimension=observed_dimension,
+                backend_dimension=idx.dim,
+                persisted_actual_dimension=actual_dimension,
+                configured_dimension=embedder.dim or embed_settings.dim,
+            ),
+            index_instance_id=lease.instance_id,
+            structured_token_counter=token_counter,
+        )
+        pipeline = {
+            "ingest_mode": "text",
+            "chunker": "recursive-character",
+            "chunk_config_fingerprint": signature.text_chunk_config_fingerprint,
+            "parser": None,
+            "source": "cli",
+        }
+        write_index_build_receipt(receipt_path, signature, document_pipeline=pipeline)
+        return deleted, written, len(idx)
 
 
 def _embed_settings_from_state_with_overrides(
@@ -238,6 +353,7 @@ def _embed_settings_from_state_with_overrides(
 # =============================================================================
 # Handlers (simple, command-focused)
 # =============================================================================
+
 
 def handle_ingest(args: argparse.Namespace) -> int:
     settings = IndexingPipelineSettings(
@@ -323,6 +439,10 @@ def handle_index(args: argparse.Namespace) -> int:
         state_path=state_path,
         reindex=bool(args.reindex),
         embeddings_out_path=embeddings_out_path,
+        chunk_settings=ChunkSettings(
+            chunk_size=args.chunk_size,
+            chunk_overlap=args.chunk_overlap,
+        ),
     )
 
     logger.info("Index: %s", index_path)
@@ -389,6 +509,7 @@ def handle_run(args: argparse.Namespace) -> int:
         state_path=state_path,
         reindex=bool(args.reindex),
         embeddings_out_path=embeddings_out_path,
+        chunk_settings=settings.chunk,
     )
 
     logger.info("Index: %s", index_path)
@@ -596,6 +717,7 @@ def handle_serve(args: argparse.Namespace) -> int:
 # Argument parsing (shared parents = low duplication, still command-focused)
 # =============================================================================
 
+
 def _add_out_dir(p: argparse.ArgumentParser) -> None:
     p.add_argument("--out-dir", type=Path, default=DEFAULTS.out_dir, help="Base output directory")
 
@@ -693,7 +815,7 @@ def build_parser() -> argparse.ArgumentParser:
     pc.set_defaults(func=handle_chunk)
 
     # index
-    px = sub.add_parser("index", parents=[p_out, p_emb, p_idx], help="Embed + index chunks.jsonl")
+    px = sub.add_parser("index", parents=[p_out, p_chk, p_emb, p_idx], help="Embed + index chunks.jsonl")
     px.add_argument("--in", dest="in_path", type=Path, required=True, help="Input chunks.jsonl")
     px.set_defaults(func=handle_index)
 
@@ -717,11 +839,16 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--q", type=str, required=True, help="Question")
     pa.add_argument("--k", type=int, default=DEFAULTS.index.top_k, help="Top-k results")
     pa.add_argument("--model", type=str, default="fake:grounded", help="SlimX model id, e.g. openai:gpt-4.1-mini")
-    pa.add_argument("--timeout", type=float, default=None,
-                    help="LLM request timeout in seconds; Ollama defaults to 180")
+    pa.add_argument(
+        "--timeout", type=float, default=None, help="LLM request timeout in seconds; Ollama defaults to 180"
+    )
     pa.add_argument("--max-tokens", type=int, default=None, help="LLM output token limit; Ollama defaults to 256")
-    pa.add_argument("--max-context-chars", type=int, default=None,
-                    help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000")
+    pa.add_argument(
+        "--max-context-chars",
+        type=int,
+        default=None,
+        help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000",
+    )
     _add_embed_overrides_query(pa)
     pa.set_defaults(func=handle_ask)
 
@@ -731,11 +858,16 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--out", type=Path, default=Path("output/eval_report.md"), help="Markdown or JSON report path")
     pe.add_argument("--k", type=int, default=DEFAULTS.index.top_k, help="Top-k results")
     pe.add_argument("--model", type=str, default="fake:grounded")
-    pe.add_argument("--timeout", type=float, default=None,
-                    help="LLM request timeout in seconds; Ollama defaults to 180")
+    pe.add_argument(
+        "--timeout", type=float, default=None, help="LLM request timeout in seconds; Ollama defaults to 180"
+    )
     pe.add_argument("--max-tokens", type=int, default=None, help="LLM output token limit; Ollama defaults to 256")
-    pe.add_argument("--max-context-chars", type=int, default=None,
-                    help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000")
+    pe.add_argument(
+        "--max-context-chars",
+        type=int,
+        default=None,
+        help="Max retrieved context chars sent to the LLM; Ollama defaults to 3000",
+    )
     _add_embed_overrides_query(pe)
     pe.set_defaults(func=handle_eval)
 

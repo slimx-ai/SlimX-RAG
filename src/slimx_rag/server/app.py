@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import threading
@@ -14,12 +15,26 @@ from langchain_core.documents import Document
 from pydantic import BaseModel, Field
 
 from slimx_rag.answer import answer
-from slimx_rag.chunk import chunk_documents, chunk_parsed_document
+from slimx_rag.chunk import TokenCounter, chunk_documents, chunk_parsed_document
 from slimx_rag.core.hashing import content_hash, path_id
 from slimx_rag.document import DocumentError, DocumentSource, parse_document
 from slimx_rag.embed import EmbeddedChunk, embed_chunks, get_cached_embedder, make_token_counter
 from slimx_rag.eval import load_eval_cases, run_eval
-from slimx_rag.index import IndexBackend, make_index_backend
+from slimx_rag.index import (
+    INDEX_BUILD_RECEIPT_FILENAME,
+    INDEX_INSTANCE_ID_FILENAME,
+    INDEX_SCHEMA_VERSION,
+    IndexBackend,
+    IndexInstanceLease,
+    IndexSignature,
+    IndexState,
+    build_index_signature,
+    load_index_build_receipt,
+    locked_index_instance,
+    make_index_backend,
+    resolve_embedding_dimension,
+    write_index_build_receipt,
+)
 from slimx_rag.index.types import SearchResult
 from slimx_rag.retrieval import Bm25Index, ChunkRecord, HybridRetriever, ScopeNotSupportedError, retrieve
 from slimx_rag.settings import (
@@ -29,10 +44,13 @@ from slimx_rag.settings import (
     RetrievalSettings,
     StructuredChunkSettings,
 )
+from slimx_rag.utils.commons import _atomic_write_text
+from slimx_rag.version import get_engine_version
 
 # Bounded limits for the file-indexing endpoint (all tunable via env).
 MAX_FILE_BYTES = int(os.getenv("RAG_MAX_FILE_BYTES", str(25 * 1024 * 1024)))
 MAX_ELEMENTS = int(os.getenv("RAG_MAX_ELEMENTS", "20000"))
+logger = logging.getLogger(__name__)
 
 
 def _backend_config() -> dict[str, object]:
@@ -86,10 +104,7 @@ def _embed_settings() -> EmbedSettings:
     return EmbedSettings(
         provider=str(override.get("provider") or os.getenv("RAG_EMBED_PROVIDER", "hash")),
         model=str(override.get("model") or os.getenv("RAG_EMBED_MODEL", "text-embedding-3-small")),
-        hf_model=str(
-            override.get("hf_model")
-            or os.getenv("RAG_HF_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-        ),
+        hf_model=str(override.get("hf_model") or os.getenv("RAG_HF_MODEL", "sentence-transformers/all-MiniLM-L6-v2")),
         dim=int(dim if dim is not None else os.getenv("RAG_EMBED_DIM", "384")),
         device=override["device"] if "device" in override else (os.getenv("RAG_EMBED_DEVICE") or None),
     )
@@ -97,8 +112,8 @@ def _embed_settings() -> EmbedSettings:
 
 def _write_embed_override(settings: EmbedSettings) -> None:
     path = _embed_override_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    _atomic_write_text(
+        path,
         json.dumps(
             {
                 "provider": settings.provider,
@@ -108,25 +123,106 @@ def _write_embed_override(settings: EmbedSettings) -> None:
                 "device": settings.device,
             }
         ),
-        "utf-8",
     )
 
 
-def _reset_index() -> None:
-    """Drop the on-disk index so the next ingest rebuilds it under the new embedding.
+class UnsupportedIndexResetError(RuntimeError):
+    """The selected backend has no verified corpus-reset primitive."""
+
+
+class IndexResetPartialFailure(RuntimeError):
+    """A reset failed and the previous corpus could not be fully restored."""
+
+
+def _stage_reset_artifact(path: Path, backup: Path) -> None:
+    os.replace(path, backup)
+
+
+def _restore_reset_artifact(backup: Path, path: Path) -> None:
+    os.replace(backup, path)
+
+
+def _reset_index(
+    index_settings: IndexSettings,
+    *,
+    lease: IndexInstanceLease,
+    new_embed_settings: EmbedSettings,
+) -> str:
+    """Transactionally stage the active local corpus and publish a fresh identity.
 
     Changing the embedding model/dim changes the vector space, so the existing index is
-    invalid and must be rebuilt. This resets the local index + state files (the default and
-    GPU-image backend); remote backends (qdrant/pgvector) expose no truncate primitive here,
-    so those deployments must be rebuilt externally.
+    invalid and must be rebuilt. Only local backends have a verified reset here. Remote
+    backends must be reset externally; rejecting them prevents a false ``index_reset``
+    response and preserves the old instance identity until the corpus is truly gone.
     """
-    with _index_lock:
-        for p in (_index_path(), _state_path()):
+    backend = (index_settings.backend or "local").lower().strip()
+    if backend not in {"local", "faiss"}:
+        raise UnsupportedIndexResetError(
+            f"index reset is unsupported for backend {backend!r}; reset its corpus externally"
+        )
+    transaction_id = secrets.token_hex(8)
+    artifacts = [
+        _index_instance_id_path(),
+        _index_build_receipt_path(),
+        _embed_override_path(),
+        _state_path(),
+        _index_path(),
+    ]
+    if backend == "faiss":
+        artifacts.append(_index_path().with_suffix(_index_path().suffix + ".meta.json"))
+    staged: list[tuple[Path, Path]] = []
+    wrote_new_override = False
+    try:
+        # Identity is staged first. Any partial mutation therefore cannot keep serving the
+        # old corpus fingerprint; a fully successful rollback restores it.
+        for path in artifacts:
+            if not path.exists():
+                continue
+            backup = path.with_name(f".{path.name}.reset-{transaction_id}")
+            _stage_reset_artifact(path, backup)
+            staged.append((path, backup))
+        _write_embed_override(new_embed_settings)
+        wrote_new_override = True
+        new_instance_id = lease.publish_new()
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        staged_paths = {original for original, _backup in staged}
+        if wrote_new_override and _embed_override_path() not in staged_paths:
             try:
-                p.unlink()
-            except (FileNotFoundError, OSError):
-                pass
-        _reset_index_cache()
+                _embed_override_path().unlink(missing_ok=True)
+            except OSError as rollback_exc:
+                rollback_errors.append(type(rollback_exc).__name__)
+        for original, backup in reversed(staged):
+            if not backup.exists():
+                rollback_errors.append("MissingBackup")
+                continue
+            try:
+                _restore_reset_artifact(backup, original)
+            except OSError as rollback_exc:
+                rollback_errors.append(type(rollback_exc).__name__)
+        if rollback_errors:
+            # Rollback could not prove restoration. Keep identity/receipt invalidated so
+            # callers cannot mistake a partial corpus for the old successful build.
+            try:
+                lease.remove()
+            except OSError as invalidation_exc:
+                rollback_errors.append(f"identity-{type(invalidation_exc).__name__}")
+            try:
+                _index_build_receipt_path().unlink(missing_ok=True)
+            except OSError as invalidation_exc:
+                rollback_errors.append(f"receipt-{type(invalidation_exc).__name__}")
+            raise IndexResetPartialFailure(
+                "index_reset_partial_failure: rollback=" + ",".join(rollback_errors)
+            ) from exc
+        raise
+
+    _reset_index_cache()
+    for _original, backup in staged:
+        try:
+            backup.unlink(missing_ok=True)
+        except OSError as cleanup_exc:
+            logger.warning("Could not remove inactive reset backup: %s", type(cleanup_exc).__name__)
+    return new_instance_id
 
 
 def _chunk_settings() -> ChunkSettings:
@@ -143,6 +239,50 @@ def _structured_chunk_settings() -> StructuredChunkSettings:
         target_tokens=int(os.getenv("RAG_TARGET_TOKENS", str(defaults.target_tokens))),
         max_tokens=int(os.getenv("RAG_MAX_TOKENS", str(defaults.max_tokens))),
     )
+
+
+def _index_signature_contract(
+    *,
+    index_settings: IndexSettings,
+    embed_settings: EmbedSettings,
+    embedding_dimension: int | None,
+    index_instance_id: str | None,
+    structured_token_counter: TokenCounter | None,
+    signature_complete: bool = True,
+    index_schema_version: int = INDEX_SCHEMA_VERSION,
+) -> IndexSignature:
+    return build_index_signature(
+        index_settings=index_settings,
+        embed_settings=embed_settings,
+        chunk_settings=_chunk_settings(),
+        structured_chunk_settings=_structured_chunk_settings(),
+        embedding_dimension=embedding_dimension,
+        index_instance_id=index_instance_id,
+        structured_token_counter=structured_token_counter,
+        signature_complete=signature_complete,
+        index_schema_version=index_schema_version,
+    )
+
+
+def _index_signature_payload(
+    *,
+    index_settings: IndexSettings,
+    embed_settings: EmbedSettings,
+    embedding_dimension: int | None,
+    index_instance_id: str | None,
+    structured_token_counter: TokenCounter | None,
+    signature_complete: bool = True,
+    index_schema_version: int = INDEX_SCHEMA_VERSION,
+) -> dict[str, object]:
+    return _index_signature_contract(
+        index_settings=index_settings,
+        embed_settings=embed_settings,
+        embedding_dimension=embedding_dimension,
+        index_instance_id=index_instance_id,
+        structured_token_counter=structured_token_counter,
+        signature_complete=signature_complete,
+        index_schema_version=index_schema_version,
+    ).to_dict()
 
 
 def _retrieval_settings() -> RetrievalSettings:
@@ -183,9 +323,7 @@ def _to_chunk_record(result: SearchResult) -> ChunkRecord:
     return ChunkRecord(
         chunk_id=result.chunk_id,
         text=result.text,
-        parent_id=str(
-            md.get("parent_id") or md.get("parent_doc_id") or md.get("doc_id") or result.chunk_id
-        ),
+        parent_id=str(md.get("parent_id") or md.get("parent_doc_id") or md.get("doc_id") or result.chunk_id),
         page_number=page if isinstance(page, int) and not isinstance(page, bool) else None,
         section=str(md["section"]) if md.get("section") is not None else None,
         page_type=str(md.get("page_type") or "unknown"),
@@ -246,6 +384,14 @@ def _index_path() -> Path:
 
 def _state_path() -> Path:
     return Path(os.getenv("RAG_STATE_PATH", "output/index_state.json"))
+
+
+def _index_instance_id_path() -> Path:
+    return _index_path().parent / INDEX_INSTANCE_ID_FILENAME
+
+
+def _index_build_receipt_path() -> Path:
+    return _index_path().parent / INDEX_BUILD_RECEIPT_FILENAME
 
 
 def _llm_timeout() -> float | None:
@@ -317,7 +463,7 @@ class EmbeddingConfigRequest(BaseModel):
     device: str | None = None
 
 
-app = FastAPI(title="SlimX-RAG Research Demo")
+app = FastAPI(title="SlimX-RAG Research Demo", version=get_engine_version())
 
 # One hot, in-process index shared by all requests. retrieve() otherwise re-reads and
 # re-parses the entire index file on every call (seconds per request as the corpus grows);
@@ -381,15 +527,18 @@ def _reset_index_cache() -> None:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    index_settings = _index_settings()
+    embed_settings = _embed_settings()
     return {
         "status": "ok",
-        "index_backend": _index_settings().backend,
-        "embed_provider": _embed_settings().provider,
-        "embed_device": _embed_settings().device,
+        "index_backend": index_settings.backend,
+        "embed_provider": embed_settings.provider,
+        "embed_device": embed_settings.device,
         "llm_model": os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
         # Whether this server enforces a bearer token. Lets a caller that *sends* a token
         # detect a deployment where the server never received one (auth silently off).
         "auth_enabled": _auth_enabled(),
+        "engine_version": get_engine_version(),
     }
 
 
@@ -407,14 +556,29 @@ def ready(authorization: str | None = Header(default=None)) -> JSONResponse:
     _check_token(authorization)
     index_settings = _index_settings()
     embed_settings = _embed_settings()
+    signature_dimension: int | None = embed_settings.dim
+    signature_schema_version = INDEX_SCHEMA_VERSION
+    signature_instance_id: str | None = None
+    signature_token_counter: TokenCounter | None = None
+    authoritative_signature: dict[str, object] | None = None
 
     def not_ready(reason: str, **extra: Any) -> JSONResponse:
+        partial = _index_signature_payload(
+            index_settings=index_settings,
+            embed_settings=embed_settings,
+            embedding_dimension=signature_dimension,
+            index_instance_id=signature_instance_id,
+            structured_token_counter=signature_token_counter,
+            signature_complete=False,
+            index_schema_version=signature_schema_version,
+        )
         return JSONResponse(
             status_code=503,
             content={
                 "ready": False,
                 "reason": reason,
                 "index_backend": index_settings.backend,
+                "index_signature": authoritative_signature or partial,
                 **extra,
             },
         )
@@ -427,74 +591,163 @@ def ready(authorization: str | None = Header(default=None)) -> JSONResponse:
         return not_ready("index_dir_unwritable", detail=type(exc).__name__)
     if not os.access(out_dir, os.W_OK):
         return not_ready("index_dir_unwritable")
-
-    # 2. The backend must load (report its current size + the index's stored embedding dim).
     try:
-        with _index_lock:
+        # Identity, durable receipt, backend inspection, and active signature comparison are
+        # one critical section. Reset/index cannot race a success response into describing a
+        # different corpus instance.
+        with _index_lock, locked_index_instance(_index_instance_id_path(), create=True) as lease:
+            # Reset writes the embedding override under this same lease. Re-read settings
+            # here so readiness cannot validate a new corpus with a pre-reset snapshot.
+            index_settings = _index_settings()
+            embed_settings = _embed_settings()
+            signature_dimension = embed_settings.dim
+            signature_instance_id = lease.instance_id
+            receipt = load_index_build_receipt(_index_build_receipt_path())
+            if receipt is not None:
+                authoritative_signature = receipt.index_signature.to_dict()
+                if receipt.index_signature.index_instance_id != signature_instance_id:
+                    return not_ready("index_build_receipt_instance_mismatch")
+
+            # 2. The backend must load and reveal its corpus dimension when possible.
             backend = _current_backend()
             index_count = len(backend)
-            stored_dim = (backend.state.embed or {}).get("dim")
-    except Exception as exc:  # noqa: BLE001 — readiness must surface a reason, never raise
+            has_known_corpus = index_count > 0 or bool(backend.state.docs)
+            backend_dim = backend.dim
+            persisted_actual_dim = (backend.state.embed or {}).get("actual_dim")
+            stored_dim = resolve_embedding_dimension(
+                backend_dimension=backend_dim,
+                persisted_actual_dimension=persisted_actual_dim,
+            )
+            signature_dimension = resolve_embedding_dimension(
+                backend_dimension=backend_dim,
+                persisted_actual_dimension=persisted_actual_dim,
+                configured_dimension=embed_settings.dim,
+            )
+            signature_schema_version = backend.state.version
+
+            # 3. The embedder/tokenizer must initialize for deep readiness.
+            try:
+                embedder = get_cached_embedder(embed_settings)
+                embed_dim = embedder.dim
+                signature_token_counter = embedder.token_counter()
+            except Exception as exc:  # noqa: BLE001
+                return not_ready("embedder_init_failed", detail=type(exc).__name__)
+            signature_dimension = resolve_embedding_dimension(
+                backend_dimension=backend_dim,
+                persisted_actual_dimension=persisted_actual_dim,
+                configured_dimension=embed_dim or embed_settings.dim,
+            )
+
+            # 4. Dimension mismatch remains a distinct actionable readiness reason.
+            if stored_dim and embed_dim and int(stored_dim) != int(embed_dim):
+                return not_ready(
+                    "embedding_dim_mismatch",
+                    stored_dim=int(stored_dim),
+                    embed_dim=int(embed_dim),
+                )
+
+            active_signature = _index_signature_payload(
+                index_settings=index_settings,
+                embed_settings=embed_settings,
+                embedding_dimension=signature_dimension,
+                index_instance_id=signature_instance_id,
+                structured_token_counter=signature_token_counter,
+                signature_complete=receipt is not None or has_known_corpus,
+                index_schema_version=signature_schema_version,
+            )
+            if receipt is None and has_known_corpus:
+                return not_ready(
+                    "index_build_receipt_missing",
+                    active_index_signature=active_signature,
+                )
+            if (
+                receipt is not None
+                and receipt.index_signature.compatibility_fingerprint != active_signature["compatibility_fingerprint"]
+            ):
+                return not_ready(
+                    "index_signature_mismatch",
+                    active_index_signature=active_signature,
+                )
+
+            model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "ready": True,
+                    "index_backend": index_settings.backend,
+                    "index_count": index_count,
+                    "embed_provider": embed_settings.provider,
+                    "embed_model": model,
+                    "embed_dim": embed_dim,
+                    "auth_enabled": _auth_enabled(),
+                    "index_signature": authoritative_signature or active_signature,
+                    "index_signature_source": ("persisted_build" if receipt is not None else "configured_partial"),
+                },
+            )
+    except TimeoutError as exc:
+        return not_ready("index_instance_id_unavailable", detail=type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 — readiness surfaces a reason, never raises
         return not_ready("backend_load_failed", detail=type(exc).__name__)
-
-    # 3. The embedder must initialize (loads + caches the model).
-    try:
-        embed_dim = get_cached_embedder(embed_settings).dim
-    except Exception as exc:  # noqa: BLE001
-        return not_ready("embedder_init_failed", detail=type(exc).__name__)
-
-    # 4. A populated index whose vectors don't match the configured embedder can't be queried
-    #    correctly — flag it so the caller reindexes rather than silently mixing dimensions.
-    if stored_dim and embed_dim and int(stored_dim) != int(embed_dim):
-        return not_ready(
-            "embedding_dim_mismatch", stored_dim=int(stored_dim), embed_dim=int(embed_dim)
-        )
-
-    model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
-    return JSONResponse(
-        status_code=200,
-        content={
-            "ready": True,
-            "index_backend": index_settings.backend,
-            "index_count": index_count,
-            "embed_provider": embed_settings.provider,
-            "embed_model": model,
-            "embed_dim": embed_dim,
-            # Mirrors /health: whether a bearer token is enforced (see _check_token).
-            "auth_enabled": _auth_enabled(),
-        },
-    )
 
 
 @app.get("/api/config")
 def config(authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
-    return {
-        "index_path": str(_index_path()),
-        "state_path": str(_state_path()),
-        "index": {
-            "backend": _index_settings().backend,
-            "top_k": _index_settings().top_k,
-        },
-        "embed": {
-            "provider": _embed_settings().provider,
-            "model": _embed_settings().model,
-            "hf_model": _embed_settings().hf_model,
-            "device": _embed_settings().device,
-        },
-        "llm_model": os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
-    }
+    # Config is inspection-only: never initialize/download a model or contact a remote
+    # backend. The durable receipt is authoritative; otherwise return an explicitly partial
+    # configured identity from local state/settings only.
+    with locked_index_instance(_index_instance_id_path(), create=False) as lease:
+        # Reset writes the embedding override under this lease, so settings are part of the
+        # same immutable response snapshot as identity, receipt, and state.
+        index_settings = _index_settings()
+        embed_settings = _embed_settings()
+        receipt = load_index_build_receipt(_index_build_receipt_path())
+        if receipt is not None and receipt.index_signature.index_instance_id != lease.instance_id:
+            raise HTTPException(status_code=500, detail="index_build_receipt_instance_mismatch")
+        instance_id = lease.instance_id
+        state = IndexState.load(_state_path())
+        persisted_actual_dimension = (state.embed or {}).get("actual_dim")
+        embedding_dimension = resolve_embedding_dimension(
+            persisted_actual_dimension=persisted_actual_dimension,
+            configured_dimension=embed_settings.dim,
+        )
+        configured_signature = _index_signature_payload(
+            index_settings=index_settings,
+            embed_settings=embed_settings,
+            embedding_dimension=embedding_dimension,
+            index_instance_id=instance_id,
+            structured_token_counter=None,
+            signature_complete=False,
+            index_schema_version=state.version,
+        )
+        index_signature = receipt.index_signature.to_dict() if receipt is not None else configured_signature
+        return {
+            "index_path": str(_index_path()),
+            "state_path": str(_state_path()),
+            "index": {
+                "backend": index_settings.backend,
+                "top_k": index_settings.top_k,
+            },
+            "embed": {
+                "provider": embed_settings.provider,
+                "model": embed_settings.model,
+                "hf_model": embed_settings.hf_model,
+                "device": embed_settings.device,
+            },
+            "llm_model": os.getenv("SLIMX_LLM_MODEL", "fake:grounded"),
+            "index_signature": index_signature,
+            "index_signature_source": "persisted_build" if receipt is not None else "configured_partial",
+            "configured_index_signature": configured_signature,
+        }
 
 
 @app.post("/api/admin/embedding")
-def set_embedding(
-    payload: EmbeddingConfigRequest, authorization: str | None = Header(default=None)
-) -> dict[str, Any]:
+def set_embedding(payload: EmbeddingConfigRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     """Set the active embedding config and reset the index (guarded by the demo token).
 
-    Switching the embedding model/device changes the vector space, so the index is reset
-    here; the caller (ControlRoom) must then re-index its documents under the new embedding.
-    The choice is persisted alongside the index, so it survives a restart.
+    Switching the embedding model/device changes the vector space and resets the index.
+    ControlRoom must then re-index its documents under the new embedding. The choice is
+    persisted alongside the index, so it survives a restart.
     """
     _check_token(authorization)
     current = _embed_settings()
@@ -509,8 +762,30 @@ def set_embedding(
         merged.validate()
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    _write_embed_override(merged)
-    _reset_index()
+    index_settings = _index_settings()
+    if index_settings.backend not in {"local", "faiss"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"index reset is unsupported for backend {index_settings.backend!r}; reset its corpus externally"),
+        )
+    # Preflight every resource needed to describe the new build before touching the old
+    # corpus. A missing HF model/dependency/tokenizer can never destroy a working index.
+    try:
+        embedder = get_cached_embedder(merged)
+        token_counter = embedder.token_counter()
+    except Exception as exc:  # noqa: BLE001 — surface only the safe exception type
+        raise HTTPException(status_code=422, detail=f"embedder_preflight_failed: {type(exc).__name__}") from exc
+    try:
+        with _index_lock, locked_index_instance(_index_instance_id_path(), create=True) as lease:
+            new_instance_id = _reset_index(
+                index_settings,
+                lease=lease,
+                new_embed_settings=merged,
+            )
+    except IndexResetPartialFailure as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=500, detail=f"index_reset_failed: {type(exc).__name__}") from exc
     return {
         "embed": {
             "provider": merged.provider,
@@ -520,6 +795,15 @@ def set_embedding(
             "device": merged.device,
         },
         "index_reset": True,
+        "index_signature": _index_signature_payload(
+            index_settings=index_settings,
+            embed_settings=merged,
+            embedding_dimension=resolve_embedding_dimension(configured_dimension=embedder.dim or merged.dim),
+            index_instance_id=new_instance_id,
+            structured_token_counter=token_counter,
+            signature_complete=False,
+        ),
+        "index_signature_source": "configured_partial",
     }
 
 
@@ -694,20 +978,71 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
         chunk_overlap=chunk_settings.chunk_overlap,
         separators=chunk_settings.separators,
     )
+    embedder = get_cached_embedder(embed_settings)
+    token_counter = embedder.token_counter()
+    with _embed_lock:
+        items: list[EmbeddedChunk] = list(embed_chunks(iter(chunks), settings=embed_settings, embedder=embedder))
 
-    with _index_lock:
+    with _index_lock, locked_index_instance(_index_instance_id_path(), create=True) as lease:
+        assert lease.instance_id is not None
+        if _embed_settings() != embed_settings or _index_settings() != index_settings:
+            raise HTTPException(status_code=409, detail="index_configuration_changed_retry")
+        previous_receipt = load_index_build_receipt(_index_build_receipt_path())
         idx = _current_backend()  # hot backend; load is amortized across posts
-        idx.set_embed_config(embed_settings)
+        persisted_actual_dimension = (idx.state.embed or {}).get("actual_dim")
+        actual_dimension = resolve_embedding_dimension(
+            emitted_dimension=(len(items[0].vector) if items else None),
+            backend_dimension=idx.dim,
+            persisted_actual_dimension=persisted_actual_dimension,
+        )
+        embedding_dimension = resolve_embedding_dimension(
+            emitted_dimension=actual_dimension,
+            configured_dimension=embedder.dim or embed_settings.dim,
+        )
+        candidate_signature = _index_signature_contract(
+            index_settings=index_settings,
+            embed_settings=embed_settings,
+            embedding_dimension=embedding_dimension,
+            index_instance_id=lease.instance_id,
+            structured_token_counter=token_counter,
+            index_schema_version=idx.state.version,
+        )
+        if previous_receipt is None and (len(idx) > 0 or bool(idx.state.docs)):
+            raise HTTPException(status_code=409, detail="index_build_receipt_missing_reindex_required")
+        if previous_receipt is not None and (
+            previous_receipt.index_signature.index_instance_id != lease.instance_id
+            or previous_receipt.index_signature.compatibility_fingerprint
+            != candidate_signature.compatibility_fingerprint
+        ):
+            raise HTTPException(status_code=409, detail="index_signature_mismatch_reindex_required")
+
         idx.delete_doc(doc_id)  # replace this document's chunks; no-op when new
-        items: list[EmbeddedChunk] = list(embed_chunks(iter(chunks), settings=embed_settings))
         upserted = idx.upsert(items, skip_existing=False)
+        idx.set_embed_config(embed_settings, dimension=actual_dimension)
         idx.save()
         _mark_index_written()  # our own write must not trigger a reload on the next read
         chunk_ids = [item.chunk_id for item in items]
         idx.commit_doc_state(doc_id, ch, chunk_ids)
         total = len(idx)
+        index_schema_version = idx.state.version
+        signature = _index_signature_contract(
+            index_settings=index_settings,
+            embed_settings=embed_settings,
+            embedding_dimension=embedding_dimension,
+            index_instance_id=lease.instance_id,
+            structured_token_counter=token_counter,
+            index_schema_version=index_schema_version,
+        )
+        pipeline = {
+            "ingest_mode": "text",
+            "chunker": "recursive-character",
+            "chunk_config_fingerprint": signature.text_chunk_config_fingerprint,
+            "parser": None,
+        }
+        build_receipt = write_index_build_receipt(_index_build_receipt_path(), signature, document_pipeline=pipeline)
 
     model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
+    index_signature = signature.to_dict()
     return {
         "status": "ready",
         "doc_id": doc_id,
@@ -717,6 +1052,10 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
         "total": total,
         "vector_backend": index_settings.backend,
         "embed": {"provider": embed_settings.provider, "model": model, "dim": embed_settings.dim},
+        "index_signature": index_signature,
+        "index_signature_source": "persisted_build",
+        "index_build_receipt": build_receipt.to_dict(),
+        "document_pipeline": pipeline,
     }
 
 
@@ -745,6 +1084,7 @@ def index_file_endpoint(
         raise HTTPException(status_code=413, detail=f"file exceeds {MAX_FILE_BYTES} bytes")
 
     embed_settings = _embed_settings()
+    index_settings = _index_settings()
     source = DocumentSource(
         document_id=document_id,
         filename=filename or file.filename or document_id,
@@ -762,20 +1102,14 @@ def index_file_endpoint(
         # Surface the parser's failure-mode message (e.g. "requires the optional dependency
         # 'pypdf'", "Could not read PDF: <ErrType>") so the caller can act. These messages
         # describe the failure, never the document content, so they are safe to return.
-        raise HTTPException(
-            status_code=422, detail=f"parse_failed: {type(exc).__name__}: {exc}"
-        ) from exc
+        raise HTTPException(status_code=422, detail=f"parse_failed: {type(exc).__name__}: {exc}") from exc
     timings["parse_ms"] = int((time.perf_counter() - t0) * 1000)
     if parsed.element_count > MAX_ELEMENTS:
-        raise HTTPException(
-            status_code=413, detail=f"document has {parsed.element_count} elements; max {MAX_ELEMENTS}"
-        )
+        raise HTTPException(status_code=413, detail=f"document has {parsed.element_count} elements; max {MAX_ELEMENTS}")
 
     t1 = time.perf_counter()
     token_counter = make_token_counter(embed_settings)
-    chunks = chunk_parsed_document(
-        parsed, settings=_structured_chunk_settings(), token_counter=token_counter
-    )
+    chunks = chunk_parsed_document(parsed, settings=_structured_chunk_settings(), token_counter=token_counter)
     timings["chunk_ms"] = int((time.perf_counter() - t1) * 1000)
 
     kb_relpath = f"{workspace_id}/{document_id}"
@@ -793,25 +1127,78 @@ def index_file_endpoint(
     embedder = get_cached_embedder(embed_settings)
     t2 = time.perf_counter()
     with _embed_lock:  # embedding off the index lock
-        items: list[EmbeddedChunk] = list(
-            embed_chunks(iter(docs), settings=embed_settings, embedder=embedder)
-        )
+        items: list[EmbeddedChunk] = list(embed_chunks(iter(docs), settings=embed_settings, embedder=embedder))
     timings["embed_ms"] = int((time.perf_counter() - t2) * 1000)
 
     t3 = time.perf_counter()
-    with _index_lock:  # hold the lock ONLY for the protected delete/upsert/save/state section
+    with _index_lock, locked_index_instance(_index_instance_id_path(), create=True) as lease:
+        assert lease.instance_id is not None
+        if _embed_settings() != embed_settings or _index_settings() != index_settings:
+            raise HTTPException(status_code=409, detail="index_configuration_changed_retry")
+        previous_receipt = load_index_build_receipt(_index_build_receipt_path())
         idx = _current_backend()
-        idx.set_embed_config(embed_settings)
+        persisted_actual_dimension = (idx.state.embed or {}).get("actual_dim")
+        actual_dimension = resolve_embedding_dimension(
+            emitted_dimension=(len(items[0].vector) if items else None),
+            backend_dimension=idx.dim,
+            persisted_actual_dimension=persisted_actual_dimension,
+        )
+        embedding_dimension = resolve_embedding_dimension(
+            emitted_dimension=actual_dimension,
+            configured_dimension=embedder.dim or embed_settings.dim,
+        )
+        candidate_signature = _index_signature_contract(
+            index_settings=index_settings,
+            embed_settings=embed_settings,
+            embedding_dimension=embedding_dimension,
+            index_instance_id=lease.instance_id,
+            structured_token_counter=token_counter,
+            index_schema_version=idx.state.version,
+        )
+        if previous_receipt is None and (len(idx) > 0 or bool(idx.state.docs)):
+            raise HTTPException(status_code=409, detail="index_build_receipt_missing_reindex_required")
+        if previous_receipt is not None and (
+            previous_receipt.index_signature.index_instance_id != lease.instance_id
+            or previous_receipt.index_signature.compatibility_fingerprint
+            != candidate_signature.compatibility_fingerprint
+        ):
+            raise HTTPException(status_code=409, detail="index_signature_mismatch_reindex_required")
+
         idx.delete_doc(doc_id)
         upserted = idx.upsert(items, skip_existing=False)
+        idx.set_embed_config(embed_settings, dimension=actual_dimension)
         idx.save()
         _mark_index_written()
         idx.commit_doc_state(doc_id, ch_hash, [it.chunk_id for it in items])
         total = len(idx)
         lexical_capable = bool(getattr(idx, "supports_inmemory_scope_filter", False))
+        index_schema_version = idx.state.version
+        signature = _index_signature_contract(
+            index_settings=index_settings,
+            embed_settings=embed_settings,
+            embedding_dimension=embedding_dimension,
+            index_instance_id=lease.instance_id,
+            structured_token_counter=token_counter,
+            index_schema_version=index_schema_version,
+        )
+        parser_pipeline: dict[str, object] = {
+            "name": parsed.parser_name,
+            "version": parsed.parser_version,
+            "extraction_backend": parsed.metadata.get("extraction_backend") or "builtin",
+            "extraction_backend_version": (parsed.metadata.get("extraction_backend_version") or parsed.parser_version),
+        }
+        pipeline = {
+            "ingest_mode": "file",
+            "chunker": "structured-token",
+            "chunk_config_fingerprint": signature.file_chunk_config_fingerprint,
+            "parser": parser_pipeline,
+            "source_type": parsed.source_type,
+        }
+        build_receipt = write_index_build_receipt(_index_build_receipt_path(), signature, document_pipeline=pipeline)
     timings["index_ms"] = int((time.perf_counter() - t3) * 1000)
 
     model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
+    index_signature = signature.to_dict()
     parent_count = len({str(d.metadata["parent_id"]) for d in docs})
     return {
         "status": "ready",
@@ -831,10 +1218,14 @@ def index_file_endpoint(
         "embedding_model": model,
         "embedding_dim": embedder.dim,
         "embedding_max_seq_len": embedder.max_seq_length,
-        "vector_backend": _index_settings().backend,
+        "vector_backend": index_settings.backend,
         "lexical_retrieval": lexical_capable,
         "warnings": list(parsed.warnings),
         "timings_ms": timings,
+        "index_signature": index_signature,
+        "index_signature_source": "persisted_build",
+        "index_build_receipt": build_receipt.to_dict(),
+        "document_pipeline": pipeline,
     }
 
 
