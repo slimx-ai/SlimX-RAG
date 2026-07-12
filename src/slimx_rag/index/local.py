@@ -121,6 +121,8 @@ class LocalJsonlIndexBackend(IndexBackend):
                 deleted += 1
         if deleted:
             self._dirty = True
+        if not self._items:
+            self._dim = None
         return deleted
 
     def upsert(self, items: Iterable[EmbeddedChunk], *, skip_existing: bool = True) -> int:

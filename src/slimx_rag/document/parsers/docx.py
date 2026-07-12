@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
 from zipfile import BadZipFile, ZipFile
 
@@ -22,6 +23,28 @@ PARSER_VERSION = "1"
 
 _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _HEADING_LEVEL = re.compile(r"heading\s*(\d)", re.IGNORECASE)
+
+
+def _python_docx_signature() -> dict[str, object]:
+    try:
+        import docx  # type: ignore
+        from docx.table import Table as _Table  # type: ignore
+        from docx.text.paragraph import Paragraph as _Paragraph  # type: ignore
+    except ImportError:
+        return {"backend": "zip-xml-fallback", "backend_version": "zip-xml-v1", "available": True}
+    # Import the same concrete readers used by ``_read_with_python_docx``. Binding them to
+    # throwaway names makes the availability signature describe the effective parse path,
+    # not merely the top-level package import.
+    del _Table, _Paragraph
+    try:
+        backend_version = version("python-docx")
+    except PackageNotFoundError:
+        backend_version = str(getattr(docx, "__version__", "unknown"))
+    return {"backend": "python-docx", "backend_version": backend_version, "available": True}
+
+
+def extraction_signature() -> dict[str, object]:
+    return _python_docx_signature()
 
 
 def _as_bytes(source: DocumentSource) -> bytes:
@@ -48,6 +71,9 @@ class DocxParser:
     name = PARSER_NAME
     version = PARSER_VERSION
 
+    def extraction_signature(self) -> dict[str, object]:
+        return extraction_signature()
+
     def supports(self, source: DocumentSource) -> bool:
         return detect_source_type(source.filename, source.mime_type) == "docx"
 
@@ -55,9 +81,15 @@ class DocxParser:
         data = _as_bytes(source)
         try:
             rows = self._read_with_python_docx(data)
+            extraction = self.extraction_signature()
         except ImportError:
             rows = self._read_with_zip(data)
-        return self._build(source, rows)
+            extraction = {
+                "backend": "zip-xml-fallback",
+                "backend_version": "zip-xml-v1",
+                "available": True,
+            }
+        return self._build(source, rows, extraction=extraction)
 
     # rows: list of (ElementType, level|None, text)
     def _read_with_python_docx(self, data: bytes) -> list[tuple[ElementType, int | None, str]]:
@@ -80,9 +112,7 @@ class DocxParser:
                 out.append((el_type, level, text))
             elif tag == "tbl":
                 table = Table(child, document)
-                rows_text = [
-                    " | ".join(cell.text.strip() for cell in row.cells) for row in table.rows
-                ]
+                rows_text = [" | ".join(cell.text.strip() for cell in row.cells) for row in table.rows]
                 text = "\n".join(r for r in rows_text if r.strip())
                 if text:
                     out.append((ElementType.TABLE, None, text))
@@ -130,8 +160,13 @@ class DocxParser:
         return out
 
     def _build(
-        self, source: DocumentSource, rows: list[tuple[ElementType, int | None, str]]
+        self,
+        source: DocumentSource,
+        rows: list[tuple[ElementType, int | None, str]],
+        *,
+        extraction: dict[str, object] | None = None,
     ) -> ParsedDocument:
+        extraction = extraction or self.extraction_signature()
         doc_id = source.document_id
         section_stack: list[tuple[int, str]] = []
         elements: list[ParsedElement] = []
@@ -177,6 +212,10 @@ class DocxParser:
             parser_version=self.version,
             page_count=None,
             pages=(page,),
+            metadata={
+                "extraction_backend": extraction["backend"],
+                "extraction_backend_version": extraction["backend_version"],
+            },
         )
 
 

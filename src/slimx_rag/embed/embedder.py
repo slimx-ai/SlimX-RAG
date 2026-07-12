@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator
@@ -28,6 +29,62 @@ from slimx_rag.settings import EmbedSettings
 from slimx_rag.utils.commons import _normalize_text
 
 logger = logging.getLogger(__name__)
+_IMMUTABLE_HF_REVISION = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+
+
+def _first_nonempty_string(candidates: Iterable[object]) -> str | None:
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _resolved_hf_model_revision(model: object, configured: str | None) -> str | None:
+    candidates: list[object] = []
+    first_module = getattr(model, "_first_module", None)
+    if callable(first_module):
+        try:
+            module = first_module()
+            config = getattr(getattr(module, "auto_model", None), "config", None)
+            candidates.append(getattr(config, "_commit_hash", None))
+        except Exception:  # noqa: BLE001 — best-effort runtime provenance
+            pass
+    resolved = _first_nonempty_string(candidates)
+    if resolved is not None:
+        return resolved
+    if configured is not None and _IMMUTABLE_HF_REVISION.fullmatch(configured.strip()):
+        return configured.strip().lower()
+    return None
+
+
+def _resolved_hf_tokenizer_revision(tokenizer: object, *, model_revision: str | None) -> str | None:
+    init_kwargs = getattr(tokenizer, "init_kwargs", None)
+    candidates: list[object] = [getattr(tokenizer, "_commit_hash", None)]
+    if isinstance(init_kwargs, dict):
+        candidates.append(init_kwargs.get("_commit_hash"))
+    # The model's resolved snapshot is a safe fallback when the tokenizer does not expose
+    # its own commit. Never use the configured/mutable label (commonly ``main``).
+    candidates.append(model_revision)
+    return _first_nonempty_string(candidates)
+
+
+def _tokenizer_vocab_fingerprint(tokenizer: object) -> str | None:
+    get_vocab = getattr(tokenizer, "get_vocab", None)
+    if not callable(get_vocab):
+        return None
+    try:
+        vocab = get_vocab()
+    except Exception:  # noqa: BLE001 — an opaque tokenizer may not expose its vocab
+        return None
+    if not isinstance(vocab, dict):
+        return None
+    digest = hashlib.blake2b(digest_size=16)
+    for token, token_id in sorted(vocab.items(), key=lambda item: str(item[0])):
+        digest.update(str(token).encode("utf-8", errors="surrogatepass"))
+        digest.update(b"\x00")
+        digest.update(str(token_id).encode("ascii", errors="ignore"))
+        digest.update(b"\x1e")
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,10 +99,18 @@ class EmbeddingTokenCounter:
     """Token counter backed by a Hugging Face tokenizer (the embedding model's own)."""
 
     name = "embedding"
+    version = "embedding-tokenizer-v1"
 
-    def __init__(self, tokenizer: object, *, max_tokens: int = 256) -> None:
+    def __init__(
+        self,
+        tokenizer: object,
+        *,
+        max_tokens: int = 256,
+        identity: str = "embedding-tokenizer:unknown",
+    ) -> None:
         self._tok = tokenizer
         self.max_tokens = max_tokens
+        self.identity = identity
 
     def count(self, text: str) -> int:
         text = text or ""
@@ -143,8 +208,7 @@ class OpenAIEmbedder(Embedder):
             from langchain_openai import OpenAIEmbeddings  # type: ignore
         except Exception as e:  # pragma: no cover
             raise RuntimeError(
-                "OpenAIEmbedder requires optional dependency 'langchain-openai'. "
-                "Install extras and set OPENAI_API_KEY."
+                "OpenAIEmbedder requires optional dependency 'langchain-openai'. Install extras and set OPENAI_API_KEY."
             ) from e
         self._emb = OpenAIEmbeddings(model=model)
 
@@ -191,6 +255,7 @@ class HuggingFaceEmbedder(Embedder):
         self._query_prefix = query_prefix
         self._document_prefix = document_prefix
         self._revision = revision
+        self._model_id = model
 
     @property
     def dim(self) -> int | None:
@@ -219,9 +284,7 @@ class HuggingFaceEmbedder(Embedder):
         return self._revision
 
     def _encode(self, texts: list[str]) -> list[list[float]]:
-        embs = self._model.encode(
-            texts, normalize_embeddings=self._normalize, show_progress_bar=False
-        )
+        embs = self._model.encode(texts, normalize_embeddings=self._normalize, show_progress_bar=False)
         return [[float(x) for x in row] for row in embs]
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -246,8 +309,27 @@ class HuggingFaceEmbedder(Embedder):
     def token_counter(self) -> TokenCounter:
         tok = getattr(self._model, "tokenizer", None)
         if tok is not None:
-            return EmbeddingTokenCounter(tok, max_tokens=self.max_seq_length or 256)
-        return super().token_counter()
+            model_revision = _resolved_hf_model_revision(self._model, self._revision)
+            tokenizer_revision = _resolved_hf_tokenizer_revision(
+                tok,
+                model_revision=model_revision,
+            )
+            vocab_fingerprint = _tokenizer_vocab_fingerprint(tok)
+            if model_revision is None:
+                raise RuntimeError("Could not resolve Hugging Face model revision identity")
+            if tokenizer_revision is None and vocab_fingerprint is None:
+                raise RuntimeError("Could not resolve Hugging Face tokenizer revision or vocabulary identity")
+            tokenizer_type = f"{type(tok).__module__}.{type(tok).__qualname__}"
+            return EmbeddingTokenCounter(
+                tok,
+                max_tokens=self.max_seq_length or 256,
+                identity=(
+                    f"hf:{self._model_id}@model:{model_revision}:tokenizer:{tokenizer_type}"
+                    f"@{tokenizer_revision or 'vocab-bound'}:"
+                    f"vocab:{vocab_fingerprint or 'unavailable'}"
+                ),
+            )
+        raise RuntimeError("Hugging Face embedder exposes no tokenizer identity")
 
 
 def make_embedder(settings: EmbedSettings) -> Embedder:
@@ -349,8 +431,7 @@ def embed_chunks(
         if not batch_docs:
             return
         texts = [
-            _normalize_text(t, max_chars=settings.max_chars, normalize=settings.normalize_text)
-            for t in batch_texts
+            _normalize_text(t, max_chars=settings.max_chars, normalize=settings.normalize_text) for t in batch_texts
         ]
         try:
             last_err: Exception | None = None
@@ -379,9 +460,7 @@ def embed_chunks(
                     if attempt < settings.retries - 1:
                         time.sleep(settings.retry_backoff_s * (2**attempt))
                         continue
-                    raise RuntimeError(
-                        f"Embedding failed after {settings.retries} attempts"
-                    ) from last_err
+                    raise RuntimeError(f"Embedding failed after {settings.retries} attempts") from last_err
         finally:
             batch_docs.clear()
             batch_texts.clear()

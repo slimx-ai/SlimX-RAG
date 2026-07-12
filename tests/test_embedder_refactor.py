@@ -22,6 +22,9 @@ class _FakeTokenizer:
     def encode(self, text: str) -> list[str]:
         return text.split()
 
+    def get_vocab(self) -> dict[str, int]:
+        return {"a": 0, "b": 1, "c": 2}
+
 
 class _FakeST:
     """SentenceTransformers stand-in WITHOUT encode_query/encode_document (prefix path)."""
@@ -42,6 +45,10 @@ class _FakeST:
 
     def get_max_seq_length(self) -> int:
         return 128
+
+    def _first_module(self) -> object:
+        config = types.SimpleNamespace(_commit_hash="fake-model-commit")
+        return types.SimpleNamespace(auto_model=types.SimpleNamespace(config=config))
 
 
 class _FakeST2:
@@ -65,21 +72,19 @@ class _FakeST2:
     def get_max_seq_length(self) -> int:
         return 64
 
+    def _first_module(self) -> object:
+        config = types.SimpleNamespace(_commit_hash="fake-model-commit")
+        return types.SimpleNamespace(auto_model=types.SimpleNamespace(config=config))
+
 
 def _install(monkeypatch: pytest.MonkeyPatch, st_cls: type) -> None:
-    monkeypatch.setitem(
-        sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=st_cls)
-    )
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=st_cls))
     reset_embedder_cache()
 
 
 def test_document_and_query_prefixes_applied(monkeypatch: pytest.MonkeyPatch) -> None:
     _install(monkeypatch, _FakeST)
-    emb = make_embedder(
-        EmbedSettings(
-            provider="hf", hf_model="m", query_prefix="query: ", document_prefix="passage: "
-        )
-    )
+    emb = make_embedder(EmbedSettings(provider="hf", hf_model="m", query_prefix="query: ", document_prefix="passage: "))
     emb.embed_documents(["doc text"])
     assert _FakeST.last_inputs == ["passage: doc text"]
     assert _FakeST.last_normalize is True  # normalize_embeddings default True
@@ -106,11 +111,67 @@ def test_token_counter_uses_embedding_tokenizer(monkeypatch: pytest.MonkeyPatch)
     counter = make_embedder(EmbedSettings(provider="hf", hf_model="m")).token_counter()
     assert counter.count("a b c d") == 4
     assert counter.max_tokens == 128
+    assert counter.version == "embedding-tokenizer-v1"
+    assert counter.identity.startswith("hf:m@model:fake-model-commit:")
+    assert "@unpinned" not in counter.identity
+    assert ":vocab:" in counter.identity
+
+
+def test_token_counter_prefers_resolved_model_commit_over_mutable_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ResolvedTokenizer(_FakeTokenizer):
+        init_kwargs = {"revision": "main", "_commit_hash": "tokenizer-commit"}
+
+    class _ResolvedST(_FakeST):
+        def __init__(self, model: str, device: str | None = None, **kwargs: object) -> None:
+            self.tokenizer = _ResolvedTokenizer()
+
+        def _first_module(self) -> object:
+            config = types.SimpleNamespace(_commit_hash="model-commit")
+            return types.SimpleNamespace(auto_model=types.SimpleNamespace(config=config))
+
+    _install(monkeypatch, _ResolvedST)
+    counter = make_embedder(EmbedSettings(provider="hf", hf_model="m")).token_counter()
+
+    assert counter.identity.startswith("hf:m@model:model-commit:")
+    assert "@main" not in counter.identity
+    assert "@tokenizer-commit" in counter.identity
+    assert ":vocab:" in counter.identity
+
+
+def test_unpinned_hf_counter_rejects_unresolved_model_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _UnresolvedST(_FakeST):
+        def _first_module(self) -> object:
+            raise AttributeError("no resolved model commit")
+
+    _install(monkeypatch, _UnresolvedST)
+
+    with pytest.raises(RuntimeError, match="model revision identity"):
+        make_embedder(EmbedSettings(provider="hf", hf_model="m", revision="main")).token_counter()
+
+
+@pytest.mark.parametrize("revision", ["a" * 40, "B" * 64])
+def test_hf_counter_accepts_explicit_immutable_commit_when_runtime_hash_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch, revision: str
+) -> None:
+    class _UnresolvedST(_FakeST):
+        def _first_module(self) -> object:
+            raise AttributeError("no runtime commit metadata")
+
+    _install(monkeypatch, _UnresolvedST)
+    counter = make_embedder(EmbedSettings(provider="hf", hf_model="m", revision=revision)).token_counter()
+
+    assert f"@model:{revision.lower()}:" in counter.identity
+    assert "@main" not in counter.identity
 
 
 def test_hash_token_counter_is_heuristic() -> None:
     counter = HashEmbedder(dim=8).token_counter()
     assert counter.count("one two three") == 3
+    assert counter.version == "heuristic-counter-v1"
 
 
 def test_cache_reuses_instance_and_keys_on_vector_settings(monkeypatch: pytest.MonkeyPatch) -> None:

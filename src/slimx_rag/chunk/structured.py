@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from slimx_rag.core.hashing import chunk_config_fingerprint, content_hash, make_chunk_id
+from slimx_rag.core.hashing import content_hash, make_chunk_id, structured_chunk_config_fingerprint
 from slimx_rag.document.model import (
     ElementType,
     PageType,
@@ -75,9 +75,7 @@ def _iter_parents(doc: ParsedDocument) -> Iterator[_Parent]:
             )
 
 
-def _identity_prefix(
-    *, source_title: str, page_number: int | None, entry: str | None, section: str | None
-) -> str:
+def _identity_prefix(*, source_title: str, page_number: int | None, entry: str | None, section: str | None) -> str:
     lines = [f"Document: {source_title}"]
     if page_number is not None:
         lines.append(f"Page: {page_number}")
@@ -107,9 +105,7 @@ def _overlap_tail_words(words: list[str], counter: TokenCounter, overlap_tokens:
     return len(words)
 
 
-def _split_text_by_tokens(
-    text: str, counter: TokenCounter, max_tokens: int, overlap_tokens: int
-) -> list[str]:
+def _split_text_by_tokens(text: str, counter: TokenCounter, max_tokens: int, overlap_tokens: int) -> list[str]:
     """Greedily split text into <= max_tokens pieces, with a small word overlap.
 
     Used only for an oversized, indivisible element. Each piece is measured so it never
@@ -152,14 +148,15 @@ def chunk_parsed_document(
     settings.validate()
     counter = token_counter or HeuristicTokenCounter()
     hard_cap = max(8, min(settings.max_tokens, counter.max_tokens))
-    cfg_hash = chunk_config_fingerprint(
-        chunk_size=settings.max_tokens,
-        chunk_overlap=settings.force_split_overlap_tokens,
-        separators=(
-            "structured-v1",
-            str(settings.target_tokens),
-            str(int(settings.include_identity_prefix)),
-        ),
+    cfg_hash = structured_chunk_config_fingerprint(
+        max_tokens=settings.max_tokens,
+        effective_max_tokens=hard_cap,
+        force_split_overlap_tokens=settings.force_split_overlap_tokens,
+        target_tokens=settings.target_tokens,
+        include_identity_prefix=settings.include_identity_prefix,
+        token_counter_name=counter.name,
+        token_counter_version=counter.version,
+        token_counter_identity=counter.identity,
     )
     out: list[RetrievalChunk] = []
     for parent in _iter_parents(doc):
@@ -195,9 +192,7 @@ def _chunk_parent(
     for el in parent.elements:
         if el.element_type == ElementType.FIELD and el.metadata.get("label"):
             candidate_sections.add(str(el.metadata["label"]))
-    max_prefix_tokens = (
-        max(counter.count(prefix_for(s)) for s in candidate_sections) if use_prefix else 0
-    )
+    max_prefix_tokens = max(counter.count(prefix_for(s)) for s in candidate_sections) if use_prefix else 0
     whole_parent_budget = max(8, hard_cap - base_prefix_tokens)
     content_budget = max(8, hard_cap - max_prefix_tokens)
     effective_target = min(settings.target_tokens, content_budget)
@@ -270,9 +265,7 @@ def _chunk_parent(
         el_tokens = counter.count(el.text)
         if el_tokens > content_budget:
             flush()
-            for piece in _split_text_by_tokens(
-                el.text, counter, content_budget, settings.force_split_overlap_tokens
-            ):
+            for piece in _split_text_by_tokens(el.text, counter, content_budget, settings.force_split_overlap_tokens):
                 emit(piece, [el], forced=True)
             continue
         if el.element_type == ElementType.TABLE:

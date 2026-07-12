@@ -9,6 +9,7 @@ unique content is never dropped based on position. OCR is intentionally not used
 from __future__ import annotations
 
 import math
+from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
 
 from ..model import DocumentSource, ParsedDocument, ParsedPage
@@ -16,8 +17,11 @@ from ..parser import DocumentParseError
 from ..structure import detect_source_type, structure_block
 
 try:  # optional dependency (the `doc` extra); import at module scope so tests can patch it
-    from pypdf import PdfReader
+    import pypdf
+
+    PdfReader = pypdf.PdfReader
 except ImportError:  # pragma: no cover - exercised only without the extra installed
+    pypdf = None  # type: ignore[assignment]
     PdfReader = None  # type: ignore[assignment, misc]
 
 PARSER_NAME = "native-pdf"
@@ -25,6 +29,23 @@ PARSER_VERSION = "1"
 
 _HEADER_FOOTER_MAX_LEN = 80  # only short lines are candidate headers/footers
 _HEADER_FOOTER_MIN_PAGES = 3  # don't bother de-noising tiny documents
+
+
+def _pypdf_version() -> str | None:
+    try:
+        return version("pypdf")
+    except PackageNotFoundError:
+        module_version = getattr(pypdf, "__version__", None)
+        return str(module_version) if module_version else None
+
+
+def extraction_signature() -> dict[str, object]:
+    available = PdfReader is not None
+    return {
+        "backend": "pypdf" if available else "unavailable",
+        "backend_version": _pypdf_version() if available else None,
+        "available": available,
+    }
 
 
 def _as_bytes(source: DocumentSource) -> bytes:
@@ -73,14 +94,15 @@ class PdfParser:
     def __init__(self, *, max_pages: int = 2000) -> None:
         self.max_pages = max_pages
 
+    def extraction_signature(self) -> dict[str, object]:
+        return extraction_signature()
+
     def supports(self, source: DocumentSource) -> bool:
         return detect_source_type(source.filename, source.mime_type) == "pdf"
 
     def parse(self, source: DocumentSource) -> ParsedDocument:
         if PdfReader is None:  # pragma: no cover - import guard
-            raise DocumentParseError(
-                "PDF parsing requires the optional dependency 'pypdf' (install the `doc` extra)."
-            )
+            raise DocumentParseError("PDF parsing requires the optional dependency 'pypdf' (install the `doc` extra).")
         data = _as_bytes(source)
         try:
             reader = PdfReader(BytesIO(data))
@@ -89,9 +111,7 @@ class PdfParser:
             raise DocumentParseError(f"Could not read PDF: {type(exc).__name__}") from exc
 
         if len(raw_pages) > self.max_pages:
-            raise DocumentParseError(
-                f"PDF has {len(raw_pages)} pages; the maximum supported is {self.max_pages}."
-            )
+            raise DocumentParseError(f"PDF has {len(raw_pages)} pages; the maximum supported is {self.max_pages}.")
 
         # Extract per-page text first (no concatenation), then de-noise repeated edges.
         page_texts: list[str] = []
@@ -113,9 +133,7 @@ class PdfParser:
                 warnings.append(f"page {i} produced no extractable text")
                 pages.append(ParsedPage(page_number=i, elements=(), title=None, text=""))
                 continue
-            elements, page_title, page_type = structure_block(
-                cleaned, id_prefix=f"{doc_id}#p{i}", page_number=i
-            )
+            elements, page_title, page_type = structure_block(cleaned, id_prefix=f"{doc_id}#p{i}", page_number=i)
             pages.append(
                 ParsedPage(
                     page_number=i,
@@ -129,6 +147,13 @@ class PdfParser:
         if repeated:
             warnings.append(f"removed {len(repeated)} repeated header/footer line(s)")
 
+        extraction = self.extraction_signature()
+        metadata: dict[str, object] = {
+            "extraction_backend": extraction["backend"],
+            "extraction_backend_version": extraction["backend_version"],
+        }
+        if repeated:
+            metadata["repeated_edges"] = sorted(repeated)
         return ParsedDocument(
             document_id=doc_id,
             title=title,
@@ -138,7 +163,7 @@ class PdfParser:
             page_count=len(pages),
             pages=tuple(pages),
             warnings=tuple(warnings),
-            metadata={"repeated_edges": sorted(repeated)} if repeated else {},
+            metadata=metadata,
         )
 
 

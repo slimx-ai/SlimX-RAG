@@ -54,6 +54,11 @@ class HashPolicy:
 
 DEFAULT_HASH_POLICY = HashPolicy()
 
+# Version of the structure-aware file chunker's configuration preimage. This is
+# separate from ``HashPolicy.chunk_id_version``, which versions the shared
+# parent/content/config/ordinal chunk-ID envelope used by every chunker.
+STRUCTURED_CHUNK_CONFIG_VERSION = "structured-v2"
+
 
 def hash_text(
     text: str,
@@ -104,10 +109,43 @@ def chunk_config_fingerprint(
     policy: HashPolicy = DEFAULT_HASH_POLICY,
 ) -> str:
     """Fingerprint chunking parameters so chunk IDs change with config."""
-    seps = "\u241E".join(separators)  # record separators unambiguously
+    seps = "\u241e".join(separators)  # record separators unambiguously
     return hash_text(
         f"{chunk_size}|{chunk_overlap}|{seps}",
         digest_size=policy.config_fingerprint_digest_size,
+        policy=policy,
+    )
+
+
+def structured_chunk_config_fingerprint(
+    *,
+    max_tokens: int,
+    effective_max_tokens: int,
+    force_split_overlap_tokens: int,
+    target_tokens: int,
+    include_identity_prefix: bool,
+    token_counter_name: str,
+    token_counter_version: str,
+    token_counter_identity: str,
+    policy: HashPolicy = DEFAULT_HASH_POLICY,
+) -> str:
+    """Fingerprint the structure-aware chunker using its chunk-ID inputs.
+
+    Keep this formula in the hashing layer: both the chunker and the public index
+    signature contract use it, so they cannot silently drift apart.
+    """
+    return chunk_config_fingerprint(
+        chunk_size=max_tokens,
+        chunk_overlap=force_split_overlap_tokens,
+        separators=(
+            STRUCTURED_CHUNK_CONFIG_VERSION,
+            str(target_tokens),
+            str(int(include_identity_prefix)),
+            str(effective_max_tokens),
+            token_counter_name,
+            token_counter_version,
+            token_counter_identity,
+        ),
         policy=policy,
     )
 

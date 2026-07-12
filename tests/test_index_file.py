@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from slimx_rag.chunk import HeuristicTokenCounter
 from slimx_rag.server.app import app
 
 _GALLERY_MD = """# Kimi K2.6
@@ -51,6 +52,9 @@ def _index_md(client: TestClient, *, ws: str = "ws1", doc: str = "gallery") -> d
 
 
 def test_index_file_returns_structured_diagnostics(file_client: TestClient) -> None:
+    configured = file_client.get("/api/config").json()
+    assert configured["index_signature_source"] == "configured_partial"
+    assert configured["index_signature"]["signature_complete"] is False
     body = _index_md(file_client)
     assert body["status"] == "ready"
     assert body["parser"] == "native-markdown"
@@ -59,15 +63,37 @@ def test_index_file_returns_structured_diagnostics(file_client: TestClient) -> N
     assert body["parent_count"] >= 2  # sections became parents
     assert body["embedding_provider"] == "hash"
     assert body["embedding_dim"] == 32
+    assert body["index_signature"]["embedding_dimension"] == 32
+    assert body["index_signature"]["parser_config_version"] == "parser-registry-v1"
+    assert body["index_signature"]["file_chunk_effective_max_tokens"] == 256
+    assert body["index_signature"]["file_chunk_token_counter_version"] == "heuristic-counter-v1"
+    assert body["document_pipeline"] == {
+        "ingest_mode": "file",
+        "chunker": "structured-token",
+        "chunk_config_fingerprint": body["index_signature"]["file_chunk_config_fingerprint"],
+        "parser": {
+            "name": "native-markdown",
+            "version": body["parser_version"],
+            "extraction_backend": "builtin",
+            "extraction_backend_version": body["parser_version"],
+        },
+        "source_type": "markdown",
+    }
+    assert body["index_signature_source"] == "persisted_build"
+    assert body["index_signature"]["signature_complete"] is True
+    persisted = file_client.get("/api/config").json()
+    assert persisted["index_signature_source"] == "persisted_build"
+    assert (
+        persisted["index_signature"]["compatibility_fingerprint"]
+        == body["index_signature"]["compatibility_fingerprint"]
+    )
     assert body["lexical_retrieval"] is True
     assert set(body["timings_ms"]) == {"parse_ms", "chunk_ms", "embed_ms", "index_ms"}
 
 
 def test_hybrid_retrieve_is_page_section_aware(file_client: TestClient) -> None:
     _index_md(file_client)
-    res = file_client.post(
-        "/api/retrieve", json={"question": "What is the key detail for Kimi K2.6?", "top_k": 5}
-    )
+    res = file_client.post("/api/retrieve", json={"question": "What is the key detail for Kimi K2.6?", "top_k": 5})
     assert res.status_code == 200
     body = res.json()
     assert body["retrieval_strategy"] == "hybrid"  # not a false hybrid claim
@@ -102,3 +128,32 @@ def test_index_file_rejects_empty(file_client: TestClient) -> None:
         files={"file": ("empty.md", b"", "text/markdown")},
     )
     assert res.status_code == 422
+
+
+def test_index_file_signature_prefers_emitted_vector_dimension(
+    file_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import importlib
+
+    appmod = importlib.import_module("slimx_rag.server.app")
+
+    class _DeclaredNineEmitsThree:
+        dim = 9
+        max_seq_length = 128
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0, 0.0] for _text in texts]
+
+        def token_counter(self) -> HeuristicTokenCounter:
+            return HeuristicTokenCounter(max_tokens=128)
+
+    fake = _DeclaredNineEmitsThree()
+    monkeypatch.setenv("RAG_EMBED_PROVIDER", "hf")
+    monkeypatch.setattr(appmod, "get_cached_embedder", lambda _settings: fake)
+    monkeypatch.setattr(appmod, "make_token_counter", lambda _settings: fake.token_counter())
+
+    body = _index_md(file_client, doc="actual-dimension")
+
+    assert body["embedding_dim"] == 9  # legacy declared-dimension field
+    assert body["index_signature"]["embedding_dimension"] == 3
+    assert file_client.get("/api/config").json()["index_signature"]["embedding_dimension"] == 3

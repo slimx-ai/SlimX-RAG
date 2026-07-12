@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
 from slimx_rag.core.hashing import DEFAULT_HASH_POLICY
 from slimx_rag.settings import ChunkSettings, EmbedSettings, IndexingPipelineSettings
 from slimx_rag.utils.commons import _atomic_write_text
+from slimx_rag.version import get_engine_version
 
 SCHEMA_VERSION = "manifest-v1"
 MANIFEST_FILENAME = "manifest.json"
@@ -19,12 +19,8 @@ def _utc_now_iso() -> str:
 
 
 def _project_version() -> str:
-    for name in ("slimx-rag", "slimx_rag"):
-        try:
-            return version(name)
-        except PackageNotFoundError:
-            continue
-    return "unknown"
+    """Backward-compatible private alias for the public engine-version helper."""
+    return get_engine_version()
 
 
 def _count_jsonl(path: Path, warnings: list[str]) -> int | None:

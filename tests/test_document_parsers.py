@@ -85,6 +85,8 @@ def test_pdf_preserves_pages_and_numbers(monkeypatch: pytest.MonkeyPatch) -> Non
     assert doc.parser_name == "native-pdf"
     assert doc.page_count == 3
     assert [p.page_number for p in doc.pages] == [1, 2, 3]
+    assert doc.metadata["extraction_backend"] == "pypdf"
+    assert doc.metadata["extraction_backend_version"]
 
 
 def test_pdf_infers_page_title_and_type(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,7 +176,15 @@ def _minimal_docx_bytes() -> bytes:
 def test_docx_zip_fallback_preserves_headings_and_tables() -> None:
     parser = DocxParser()
     rows = parser._read_with_zip(_minimal_docx_bytes())
-    doc = parser._build(DocumentSource(document_id="d", filename="f.docx"), rows)
+    doc = parser._build(
+        DocumentSource(document_id="d", filename="f.docx"),
+        rows,
+        extraction={
+            "backend": "zip-xml-fallback",
+            "backend_version": "zip-xml-v1",
+            "available": True,
+        },
+    )
     assert doc.title == "My Title"
     heads = [e.text for e in doc.elements if e.element_type in (ElementType.HEADING, ElementType.TITLE)]
     assert "Section" in heads
@@ -182,6 +192,25 @@ def test_docx_zip_fallback_preserves_headings_and_tables() -> None:
     assert tables and "A | B" in tables[0].text
     body = [e for e in doc.elements if e.text == "Body text."][0]
     assert body.section_path[-1] == "Section"
+    assert doc.metadata == {
+        "extraction_backend": "zip-xml-fallback",
+        "extraction_backend_version": "zip-xml-v1",
+    }
+
+
+def test_docx_parse_records_effective_zip_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = DocxParser()
+
+    def missing_python_docx(_data: bytes) -> list[tuple[ElementType, int | None, str]]:
+        raise ImportError("python-docx unavailable")
+
+    monkeypatch.setattr(parser, "_read_with_python_docx", missing_python_docx)
+    doc = parser.parse(DocumentSource(document_id="d", filename="f.docx", content=_minimal_docx_bytes()))
+
+    assert doc.metadata["extraction_backend"] == "zip-xml-fallback"
+    assert doc.metadata["extraction_backend_version"] == "zip-xml-v1"
 
 
 def test_detect_source_type_and_dispatch() -> None:

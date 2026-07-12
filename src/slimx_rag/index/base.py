@@ -99,24 +99,32 @@ class IndexBackend(ABC):
     def query(self, query_vector: list[float], *, top_k: int | None = None) -> list[SearchResult]:
         """Return top-k most similar chunks."""
 
-    def set_embed_config(self, embed: EmbedSettings) -> None:
+    def set_embed_config(self, embed: EmbedSettings, *, dimension: int | None = None) -> None:
         """Persist embedding configuration used to produce vectors.
 
         This intentionally does not set backend dimension. The backend dimension
         is the actual stored vector dimension and should be inferred from vectors
         or explicitly constrained by backend_config['dim'] where a backend needs
-        to create remote storage before upsert.
+        to create remote storage before upsert. Callers that already emitted vectors
+        pass their actual ``dimension`` so readiness and receipts describe the corpus,
+        not a provider's inactive/default configured dimension.
         """
+        actual_dimension = int(dimension) if dimension is not None and int(dimension) > 0 else None
         self.state.embed = {
             "provider": embed.provider,
             "model": embed.model,
             "hf_model": embed.hf_model,
-            "dim": embed.dim,
+            "dim": actual_dimension or embed.dim,
+            "actual_dim": actual_dimension,
             "batch_size": embed.batch_size,
             "retries": embed.retries,
             "retry_backoff_s": embed.retry_backoff_s,
             "normalize_text": embed.normalize_text,
             "max_chars": embed.max_chars,
+            "normalize_embeddings": embed.normalize_embeddings,
+            "query_prefix": embed.query_prefix,
+            "document_prefix": embed.document_prefix,
+            "revision": embed.revision,
         }
 
     def _apply_metadata_whitelist(self, md: dict[str, object]) -> dict[str, object]:
@@ -151,7 +159,7 @@ class IndexBackend(ABC):
         current_doc_ids = set(current_docs.keys())
 
         # Deleted docs: present in state, absent now
-        for doc_id in (previous_doc_ids - current_doc_ids):
+        for doc_id in previous_doc_ids - current_doc_ids:
             old = self.state.docs.get(doc_id) or {}
             deleted += self.delete(old.get("chunk_ids", []) or [])
 

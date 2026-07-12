@@ -6,6 +6,8 @@ from pathlib import Path
 
 from slimx_rag.utils.commons import _atomic_write_text
 
+INDEX_SCHEMA_VERSION = 1
+
 
 @dataclass(frozen=True, slots=True)
 class SearchResult:
@@ -25,7 +27,7 @@ class IndexState:
     embed: provider/model/dim/etc used to build the index
     """
 
-    version: int = 1
+    version: int = INDEX_SCHEMA_VERSION
     embed: dict | None = None
     docs: dict[str, dict] = field(default_factory=dict)
 
@@ -38,7 +40,7 @@ class IndexState:
             if not isinstance(data, dict):
                 raise ValueError("state must be a JSON object")
             st = cls()
-            st.version = int(data.get("version", 1))
+            st.version = int(data.get("version", INDEX_SCHEMA_VERSION))
             st.embed = data.get("embed")
             st.docs = dict(data.get("docs", {}) or {})
             return st

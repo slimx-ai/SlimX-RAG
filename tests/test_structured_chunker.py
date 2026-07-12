@@ -10,9 +10,7 @@ from slimx_rag.document import DocumentSource, PageType, parse_document
 from slimx_rag.document.parsers import pdf as pdf_module
 from slimx_rag.document.parsers.pdf import PdfParser
 
-_PAGE_TIMELINE = "\n".join(
-    ["Model Index", "Kimi K2.5 2026-01-10", "Kimi K2.6 2026-02-20", "Kimi K2.7 2026-03-30"]
-)
+_PAGE_TIMELINE = "\n".join(["Model Index", "Kimi K2.5 2026-01-10", "Kimi K2.6 2026-02-20", "Kimi K2.7 2026-03-30"])
 _PAGE_FACT = "\n".join(
     [
         "Kimi K2.6",
@@ -43,9 +41,7 @@ class _FakeReader:
 
 def _parse(monkeypatch: pytest.MonkeyPatch) -> object:
     monkeypatch.setattr(pdf_module, "PdfReader", _FakeReader)
-    src = DocumentSource(
-        document_id="doc1", filename="gallery.pdf", mime_type="application/pdf", content=b"%PDF"
-    )
+    src = DocumentSource(document_id="doc1", filename="gallery.pdf", mime_type="application/pdf", content=b"%PDF")
     return PdfParser().parse(src)
 
 
@@ -114,3 +110,17 @@ def test_deterministic_chunk_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     b = chunk_parsed_document(doc, token_counter=HeuristicTokenCounter(max_tokens=1000))
     assert [c.chunk_id for c in a] == [c.chunk_id for c in b]
     assert len({c.chunk_id for c in a}) == len(a)  # unique ids
+
+
+def test_chunk_ids_bind_effective_cap_and_counter_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    doc = _parse(monkeypatch)
+
+    class _HeuristicV2(HeuristicTokenCounter):
+        version = "heuristic-counter-v2"
+
+    base = chunk_parsed_document(doc, token_counter=HeuristicTokenCounter(max_tokens=1000))
+    lower_cap = chunk_parsed_document(doc, token_counter=HeuristicTokenCounter(max_tokens=256))
+    newer_counter = chunk_parsed_document(doc, token_counter=_HeuristicV2(max_tokens=1000))
+
+    assert [chunk.chunk_id for chunk in base] != [chunk.chunk_id for chunk in lower_cap]
+    assert [chunk.chunk_id for chunk in base] != [chunk.chunk_id for chunk in newer_counter]

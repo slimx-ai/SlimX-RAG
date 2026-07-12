@@ -20,6 +20,8 @@ class TokenCounter(Protocol):
     """Counts tokens for a piece of text and reports the model's hard token limit."""
 
     name: str
+    version: str
+    identity: str
     max_tokens: int
 
     def count(self, text: str) -> int:
@@ -35,6 +37,8 @@ class HeuristicTokenCounter:
     """
 
     name = "heuristic"
+    version = "heuristic-counter-v1"
+    identity = "slimx-rag:heuristic"
 
     def __init__(self, max_tokens: int = 256) -> None:
         if max_tokens <= 0:

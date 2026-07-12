@@ -55,8 +55,9 @@ The canonical interface is defined in `base.py` as `IndexBackend`. Every backend
   - Persist updated index structures (if applicable).
   - Remote backends may treat this as a no-op.
 
-- `set_embed_config(embed: EmbedSettings) -> None`
+- `set_embed_config(embed: EmbedSettings, *, dimension: int | None = None) -> None`
   - Store the embedding configuration in `state.embed` for traceability.
+  - Pass `dimension` only from emitted/backend evidence; it is persisted as `actual_dim`.
 
 - `upsert(items: Iterable[EmbeddedChunk], *, skip_existing: bool = True) -> int`
   - Insert or update chunks.
@@ -242,12 +243,13 @@ class MyBackend(IndexBackend):
     def save(self) -> None:
         ...
 
-    def set_embed_config(self, embed: EmbedSettings) -> None:
+    def set_embed_config(self, embed: EmbedSettings, *, dimension: int | None = None) -> None:
         self.state.embed = {
             "provider": embed.provider,
             "model": embed.model,
             "hf_model": embed.hf_model,
-            "dim": embed.dim,
+            "dim": dimension or embed.dim,
+            "actual_dim": dimension,
         }
 
     def upsert(self, items: Iterable[EmbeddedChunk], *, skip_existing: bool = True) -> int:

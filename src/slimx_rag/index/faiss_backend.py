@@ -39,9 +39,7 @@ class FaissIndexBackend(IndexBackend):
         try:
             import faiss  # type: ignore
         except ImportError as e:
-            raise ImportError(
-                "FAISS backend requires optional dependency. Install with: uv sync --extra faiss"
-            ) from e
+            raise ImportError("FAISS backend requires optional dependency. Install with: uv sync --extra faiss") from e
 
         self._faiss = faiss  # module
         self._index: Any = None  # faiss index
@@ -101,7 +99,10 @@ class FaissIndexBackend(IndexBackend):
 
     def save(self) -> None:
         if self._index is None:
-            # nothing to save yet
+            # An explicitly cleared/reindexed empty corpus must not leave the old index
+            # artifacts on disk, where a restart would resurrect stale vectors.
+            self.index_path.unlink(missing_ok=True)
+            self._meta_path.unlink(missing_ok=True)
             self._save_state_if_enabled()
             return
 
@@ -153,6 +154,9 @@ class FaissIndexBackend(IndexBackend):
             self._chunk_to_id.pop(removed_cid, None)
             self._payload.pop(removed_cid, None)
             deleted += 1
+        if self._index.ntotal == 0:
+            self._index = None
+            self._dim = None
         return deleted
 
     def upsert(self, items: Iterable[EmbeddedChunk], *, skip_existing: bool = True) -> int:
@@ -180,6 +184,7 @@ class FaissIndexBackend(IndexBackend):
                     continue
                 # overwrite: delete then re-add
                 self.delete([cid])
+                self._ensure_index(dim)
 
             faiss_id = self._next_id
             self._next_id += 1
