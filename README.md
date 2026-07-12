@@ -106,7 +106,8 @@ The Docker image is **turnkey build-then-serve**: point it at a knowledge-base d
 and it builds the index on first start (with the local `hf` sentence-transformers
 embedder, baked into the image — no network needed at runtime), then serves
 `/health`, `/ready`, `/api/retrieve`, `/api/ask`, `/api/index`, and
-`/api/index/file` on port 8080.
+`/api/index/file` on port 8080. Version 0.2.8 also exposes the authenticated maintenance
+endpoint `POST /api/admin/index/reset`.
 
 `POST /api/index` `{workspace_id, document_id, text, metadata?}` ingests a single
 document into the live index (chunk → embed → upsert) so a downstream app can index
@@ -125,6 +126,37 @@ receipt; `/api/config` serves that receipt without loading a model or contacting
 Downstream applications should persist the successful indexing signature and compare its
 compatibility fingerprint with `/ready`; see
 [the index signature contract](docs/index-signature.md).
+
+### Explicit index reset
+
+When `/ready` reports a corpus-wide signature, receipt, state, or instance mismatch,
+an operator can explicitly discard a local JSONL/FAISS corpus without pretending that the
+embedding configuration changed. Configure the canonical service token first; the legacy
+`DEMO_AUTH_TOKEN` is deliberately insufficient for this destructive endpoint:
+
+```bash
+export RAG_AUTH_TOKEN="replace-me"
+curl -X POST localhost:8080/api/admin/index/reset \
+  -H "Authorization: Bearer $RAG_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "confirmation": "RESET INDEX",
+    "expected_index_instance_id": "idx_0123456789abcdef0123456789abcdef",
+    "expected_compatibility_fingerprint": "0123456789abcdef"
+  }'
+```
+
+Both precondition fields must be present. `expected_index_instance_id: null` explicitly
+asserts that no instance exists. A null fingerprint is accepted only when the engine reports
+that no trustworthy receipt exists; otherwise use the fingerprint from `/ready`, its
+`active_index_signature`, a prior reset response, or `/api/config`. A stale precondition
+returns HTTP 409 without mutation. The response includes the previous signature/instance,
+new instance, new partial signature/source, engine version, and `index_reset: true`.
+
+The route accepts no path, collection, or deletion selector. Local and FAISS resets reuse
+the transactional engine reset, preserve the current embedding override, and require
+embedder/token-counter preflight. Qdrant and pgvector return a structured HTTP 409 with the
+required operator action; their namespaces must be reset by the owning backend.
 
 ```bash
 # Build (or pull the published image: ghcr.io/slimx-ai/slimx-rag)

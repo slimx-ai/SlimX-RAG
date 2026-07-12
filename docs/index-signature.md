@@ -11,6 +11,7 @@ The signature is returned by:
 - `POST /api/index`
 - `POST /api/index/file`
 - `POST /api/admin/embedding`
+- `POST /api/admin/index/reset` (added in 0.2.8)
 
 All pre-0.2.7 response fields remain unchanged.
 
@@ -139,6 +140,47 @@ describing a partial corpus as the old successful build.
 Qdrant and pgvector currently have no host-level truncate primitive, so the endpoint returns
 HTTP 409 before changing the embedding override, corpus metadata, or instance identity.
 Operators must reset those remote corpus namespaces explicitly and then reconfigure/reindex.
+
+### Explicit same-embedding maintenance reset (0.2.8)
+
+`POST /api/admin/index/reset` is the recovery contract for a global signature, receipt,
+state, or instance mismatch when changing embedding settings would be false provenance.
+It is intentionally narrower than a generic deletion API:
+
+- canonical `RAG_AUTH_TOKEN` must be configured and supplied as a Bearer token;
+- `confirmation` must be the exact literal `RESET INDEX`;
+- `expected_index_instance_id` is required but nullable (`null` asserts that no identity
+  exists), and is always compared under the corpus lease;
+- `expected_compatibility_fingerprint` is also required but nullable. Null is accepted only
+  when the receipt is unreadable or belongs to a different instance; otherwise it must match
+  the authoritative receipt or one of the engine's configured/runtime partial signatures;
+- no request field selects a path, collection, namespace, document, or arbitrary artifact.
+
+The endpoint preflights the active embedder and token counter, then reuses the transactional
+local/FAISS reset with the current embedding settings while leaving `embed_override.json`
+absent or byte-for-byte unchanged. Its response contains `previous_index_instance_id`,
+`previous_index_signature` and source, `new_index_instance_id`, the new incomplete
+`index_signature` and source, top-level `engine_version`, and `index_reset=true`.
+
+HTTP 409 precondition/configuration failures are structured and do not mutate artifacts.
+Qdrant/pgvector return `index_reset_backend_unsupported` plus an `owner_action` before any
+preflight or mutation. A failed local transaction rolls all staged corpus artifacts back;
+if rollback cannot be proven, the existing partial-failure contract invalidates identity and
+receipt rather than claiming the previous corpus is usable.
+
+Every indexing request snapshots the instance generation and signature-shaping settings
+before off-lock parse/chunk/embed work, then compares them under the final write lease. Work
+that crossed a reset returns structured `index_generation_changed_retry`; concurrent first
+writers cannot both publish into the initial generation.
+
+`/ready` is the recovery diagnostic surface. Every ready/not-ready response includes
+`auth_enabled` and top-level `engine_version`; invalid receipts and state use the distinct
+reasons `index_build_receipt_invalid` and `index_state_invalid`. For a receipt-instance
+mismatch it also returns `active_index_signature`, built with the observed active instance,
+so the caller can satisfy instance CAS without trusting the foreign receipt. `/api/config`
+remains offline; an unreadable state may still make config inspection fail, so recovery
+clients should use `/ready` and may send a null fingerprint only when no trustworthy
+signature is available.
 
 ## Security
 

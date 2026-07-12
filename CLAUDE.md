@@ -68,7 +68,13 @@ Chunking sorts documents by a stable key before splitting; query results are sor
 
 `server/app.py` is a FastAPI app (the `serve` subcommand; needs the `demo` extra). Unlike the CLI, it is configured **entirely through environment variables**, rebuilt per request: `RAG_*` for index/embed/chunk settings (`RAG_INDEX_BACKEND`, `RAG_EMBED_PROVIDER`, `RAG_INDEX_PATH`, `RAG_STATE_PATH`, `RAG_TOP_K`, …), `SLIMX_*` for the LLM (`SLIMX_LLM_MODEL`, `SLIMX_LLM_TIMEOUT`, `SLIMX_LLM_MAX_TOKENS`, `SLIMX_MAX_CONTEXT_CHARS`), and optional `DEMO_AUTH_TOKEN` for Bearer auth. `serve` itself takes only `--host`/`--port`. See `.env.example` for the full surface.
 
-Endpoints: `GET /health`, `GET /api/config`, `POST /api/retrieve`, `POST /api/ask`, `POST /api/eval/run`, `POST /api/index`, and `GET /` (HTML UI from `server/static/index.html`).
+Endpoints: `GET /health`, `GET /ready`, `GET /api/config`, `POST /api/retrieve`, `POST /api/ask`, `POST /api/eval/run`, `POST /api/index`, `POST /api/index/file`, authenticated `POST /api/admin/index/reset`, and `GET /` (HTML UI from `server/static/index.html`).
+
+The explicit index reset is a narrow maintenance contract: it requires canonical
+`RAG_AUTH_TOKEN`, the exact `RESET INDEX` confirmation, and required compare-and-swap
+instance/fingerprint fields. It accepts no path or backend namespace. It transactionally
+resets local/FAISS artifacts while preserving the active embedding override; remote backends
+return a structured HTTP 409 because the service cannot prove their namespace was cleared.
 
 The server keeps **one hot in-memory backend** (`_current_backend()`), loaded once and reused across requests — `retrieve()` otherwise re-reads and re-parses the whole index file every call. The cache is refreshed only when the index file's `(mtime, size)` changes (e.g. an external CLI rebuild); pass `backend=` to `retrieve()` to inject it. A single reentrant `_index_lock` guards both the cached backend and the read-modify-write ingest path, so reads never see a half-applied write. `_reset_index_cache()` exists for tests.
 
