@@ -70,6 +70,8 @@ def test_ready_flags_embedding_dim_mismatch(client: TestClient, monkeypatch: pyt
     assert body["ready"] is False
     assert body["reason"] == "embedding_dim_mismatch"
     assert body["stored_dim"] == 16 and body["embed_dim"] == 8
+    assert body["auth_enabled"] is False
+    assert body["engine_version"]
     # The signature describes the existing corpus, so backend evidence wins over the
     # newly configured incompatible embedder (reported separately as embed_dim=8).
     assert body["index_signature"]["embedding_dimension"] == 16
@@ -230,7 +232,8 @@ def test_index_rejects_pre_reset_embedding_snapshot(ingest_client: TestClient, m
             index_future.result(timeout=5)
 
     assert exc_info.value.status_code == 409
-    assert exc_info.value.detail == "index_configuration_changed_retry"
+    assert exc_info.value.detail["code"] == "index_generation_changed_retry"
+    assert exc_info.value.detail["retryable"] is True
     assert reset_body["index_signature"]["embedding_configured_dimension"] == 8
     artifact_dir = Path(os.environ["RAG_INDEX_PATH"]).parent
     assert (artifact_dir / "index_instance_id").exists()
@@ -350,8 +353,8 @@ def test_health_and_ready_report_auth_enabled(client: TestClient, monkeypatch: p
     assert client.get("/health").json()["auth_enabled"] is True
     ready = client.get("/ready", headers={"Authorization": "Bearer secret"})
     assert ready.status_code in (200, 503)
-    if ready.status_code == 200:
-        assert ready.json()["auth_enabled"] is True
+    assert ready.json()["auth_enabled"] is True
+    assert ready.json()["engine_version"]
 
 
 def test_bad_backend_config_env_returns_clean_500(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -382,6 +385,7 @@ def ingest_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient
     monkeypatch.setenv("RAG_STATE_PATH", str(out / "index_state.json"))
     monkeypatch.setenv("RAG_EMBED_DIM", "16")
     monkeypatch.delenv("DEMO_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("RAG_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("RAG_BACKEND_CONFIG", raising=False)
     return TestClient(app)
 

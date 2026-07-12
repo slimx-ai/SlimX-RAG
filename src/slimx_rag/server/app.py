@@ -7,7 +7,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -147,13 +147,14 @@ def _reset_index(
     *,
     lease: IndexInstanceLease,
     new_embed_settings: EmbedSettings,
+    persist_embed_override: bool,
 ) -> str:
     """Transactionally stage the active local corpus and publish a fresh identity.
 
-    Changing the embedding model/dim changes the vector space, so the existing index is
-    invalid and must be rebuilt. Only local backends have a verified reset here. Remote
-    backends must be reset externally; rejecting them prevents a false ``index_reset``
-    response and preserves the old instance identity until the corpus is truly gone.
+    Both embedding changes and explicit maintenance resets use this one verified primitive.
+    Only local backends have a verified reset here. Remote backends must be reset externally;
+    rejecting them prevents a false ``index_reset`` response and preserves the old instance
+    identity until the corpus is truly gone.
     """
     backend = (index_settings.backend or "local").lower().strip()
     if backend not in {"local", "faiss"}:
@@ -164,10 +165,11 @@ def _reset_index(
     artifacts = [
         _index_instance_id_path(),
         _index_build_receipt_path(),
-        _embed_override_path(),
         _state_path(),
         _index_path(),
     ]
+    if persist_embed_override:
+        artifacts.insert(2, _embed_override_path())
     if backend == "faiss":
         artifacts.append(_index_path().with_suffix(_index_path().suffix + ".meta.json"))
     staged: list[tuple[Path, Path]] = []
@@ -181,8 +183,9 @@ def _reset_index(
             backup = path.with_name(f".{path.name}.reset-{transaction_id}")
             _stage_reset_artifact(path, backup)
             staged.append((path, backup))
-        _write_embed_override(new_embed_settings)
-        wrote_new_override = True
+        if persist_embed_override:
+            _write_embed_override(new_embed_settings)
+            wrote_new_override = True
         new_instance_id = lease.publish_new()
     except Exception as exc:
         rollback_errors: list[str] = []
@@ -248,14 +251,16 @@ def _index_signature_contract(
     embedding_dimension: int | None,
     index_instance_id: str | None,
     structured_token_counter: TokenCounter | None,
+    text_chunk_settings: ChunkSettings | None = None,
+    file_chunk_settings: StructuredChunkSettings | None = None,
     signature_complete: bool = True,
     index_schema_version: int = INDEX_SCHEMA_VERSION,
 ) -> IndexSignature:
     return build_index_signature(
         index_settings=index_settings,
         embed_settings=embed_settings,
-        chunk_settings=_chunk_settings(),
-        structured_chunk_settings=_structured_chunk_settings(),
+        chunk_settings=text_chunk_settings or _chunk_settings(),
+        structured_chunk_settings=file_chunk_settings or _structured_chunk_settings(),
         embedding_dimension=embedding_dimension,
         index_instance_id=index_instance_id,
         structured_token_counter=structured_token_counter,
@@ -271,6 +276,8 @@ def _index_signature_payload(
     embedding_dimension: int | None,
     index_instance_id: str | None,
     structured_token_counter: TokenCounter | None,
+    text_chunk_settings: ChunkSettings | None = None,
+    file_chunk_settings: StructuredChunkSettings | None = None,
     signature_complete: bool = True,
     index_schema_version: int = INDEX_SCHEMA_VERSION,
 ) -> dict[str, object]:
@@ -280,6 +287,8 @@ def _index_signature_payload(
         embedding_dimension=embedding_dimension,
         index_instance_id=index_instance_id,
         structured_token_counter=structured_token_counter,
+        text_chunk_settings=text_chunk_settings,
+        file_chunk_settings=file_chunk_settings,
         signature_complete=signature_complete,
         index_schema_version=index_schema_version,
     ).to_dict()
@@ -430,6 +439,22 @@ def _check_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Missing or invalid service token")
 
 
+def _check_index_reset_token(authorization: str | None) -> None:
+    """Require the canonical service token for the destructive maintenance reset."""
+    token = os.getenv("RAG_AUTH_TOKEN")
+    if not token:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "index_reset_auth_not_configured",
+                "owner_action": "Configure RAG_AUTH_TOKEN before using the index reset endpoint.",
+            },
+        )
+    expected = f"Bearer {token}"
+    if authorization is None or not secrets.compare_digest(authorization, expected):
+        raise HTTPException(status_code=401, detail="Missing or invalid service token")
+
+
 class QuestionRequest(BaseModel):
     question: str
     model: str | None = None
@@ -461,6 +486,29 @@ class EmbeddingConfigRequest(BaseModel):
     hf_model: str | None = None
     dim: int | None = Field(default=None, gt=0)
     device: str | None = None
+
+
+class IndexResetRequest(BaseModel):
+    """Explicit destructive confirmation plus required optimistic corpus preconditions."""
+
+    confirmation: Literal["RESET INDEX"]
+    # Required but nullable: callers must explicitly assert that they observed either a
+    # concrete instance or an empty/uninitialized corpus. Omitting the field is not allowed.
+    expected_index_instance_id: str | None = Field(pattern=r"^idx_[0-9a-f]{32}$")
+    # Also required but nullable. Null is an explicit assertion that no trustworthy
+    # fingerprint exists (for example, a malformed receipt); instance CAS still applies.
+    expected_compatibility_fingerprint: str | None = Field(pattern=r"^[0-9a-f]{16}$")
+
+
+class IndexResetResponse(BaseModel):
+    index_reset: Literal[True]
+    previous_index_instance_id: str | None
+    previous_index_signature: dict[str, Any]
+    previous_index_signature_source: Literal["persisted_build", "configured_partial"]
+    new_index_instance_id: str
+    index_signature: dict[str, Any]
+    index_signature_source: Literal["configured_partial"]
+    engine_version: str
 
 
 app = FastAPI(title="SlimX-RAG Research Demo", version=get_engine_version())
@@ -578,6 +626,8 @@ def ready(authorization: str | None = Header(default=None)) -> JSONResponse:
                 "ready": False,
                 "reason": reason,
                 "index_backend": index_settings.backend,
+                "auth_enabled": _auth_enabled(),
+                "engine_version": get_engine_version(),
                 "index_signature": authoritative_signature or partial,
                 **extra,
             },
@@ -602,11 +652,30 @@ def ready(authorization: str | None = Header(default=None)) -> JSONResponse:
             embed_settings = _embed_settings()
             signature_dimension = embed_settings.dim
             signature_instance_id = lease.instance_id
-            receipt = load_index_build_receipt(_index_build_receipt_path())
+            try:
+                receipt = load_index_build_receipt(_index_build_receipt_path())
+            except RuntimeError as exc:
+                return not_ready("index_build_receipt_invalid", detail=type(exc).__name__)
             if receipt is not None:
                 authoritative_signature = receipt.index_signature.to_dict()
                 if receipt.index_signature.index_instance_id != signature_instance_id:
-                    return not_ready("index_build_receipt_instance_mismatch")
+                    active_signature = _index_signature_payload(
+                        index_settings=index_settings,
+                        embed_settings=embed_settings,
+                        embedding_dimension=signature_dimension,
+                        index_instance_id=signature_instance_id,
+                        structured_token_counter=None,
+                        signature_complete=False,
+                    )
+                    return not_ready(
+                        "index_build_receipt_instance_mismatch",
+                        active_index_signature=active_signature,
+                    )
+
+            try:
+                IndexState.load(_state_path())
+            except RuntimeError as exc:
+                return not_ready("index_state_invalid", detail=type(exc).__name__)
 
             # 2. The backend must load and reveal its corpus dimension when possible.
             backend = _current_backend()
@@ -680,6 +749,7 @@ def ready(authorization: str | None = Header(default=None)) -> JSONResponse:
                     "embed_model": model,
                     "embed_dim": embed_dim,
                     "auth_enabled": _auth_enabled(),
+                    "engine_version": get_engine_version(),
                     "index_signature": authoritative_signature or active_signature,
                     "index_signature_source": ("persisted_build" if receipt is not None else "configured_partial"),
                 },
@@ -701,7 +771,17 @@ def config(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         # same immutable response snapshot as identity, receipt, and state.
         index_settings = _index_settings()
         embed_settings = _embed_settings()
-        receipt = load_index_build_receipt(_index_build_receipt_path())
+        receipt_status = "missing"
+        try:
+            receipt = load_index_build_receipt(_index_build_receipt_path())
+            if receipt is not None:
+                receipt_status = "valid"
+        except RuntimeError:
+            # The explicit admin reset can recover this state. Config remains an offline,
+            # non-mutating way to obtain the configured-partial fingerprint needed for its
+            # optimistic precondition.
+            receipt = None
+            receipt_status = "invalid"
         if receipt is not None and receipt.index_signature.index_instance_id != lease.instance_id:
             raise HTTPException(status_code=500, detail="index_build_receipt_instance_mismatch")
         instance_id = lease.instance_id
@@ -738,6 +818,7 @@ def config(authorization: str | None = Header(default=None)) -> dict[str, Any]:
             "index_signature": index_signature,
             "index_signature_source": "persisted_build" if receipt is not None else "configured_partial",
             "configured_index_signature": configured_signature,
+            "index_build_receipt_status": receipt_status,
         }
 
 
@@ -781,6 +862,7 @@ def set_embedding(payload: EmbeddingConfigRequest, authorization: str | None = H
                 index_settings,
                 lease=lease,
                 new_embed_settings=merged,
+                persist_embed_override=True,
             )
     except IndexResetPartialFailure as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -805,6 +887,235 @@ def set_embedding(payload: EmbeddingConfigRequest, authorization: str | None = H
         ),
         "index_signature_source": "configured_partial",
     }
+
+
+@app.post("/api/admin/index/reset", response_model=IndexResetResponse)
+def reset_index_endpoint(
+    payload: IndexResetRequest,
+    authorization: str | None = Header(default=None),
+) -> IndexResetResponse:
+    """Discard the configured local corpus without changing its embedding configuration.
+
+    This is a deliberately narrow maintenance operation. It accepts no filesystem path or
+    backend namespace, requires an exact confirmation literal, and compares the caller's
+    last observed instance and fingerprint while holding the corpus identity lease.
+    """
+    _check_index_reset_token(authorization)
+    index_settings = _index_settings()
+    backend_name = (index_settings.backend or "local").lower().strip()
+    if backend_name not in {"local", "faiss"}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "index_reset_backend_unsupported",
+                "backend": backend_name,
+                "retryable": False,
+                "owner_action": (
+                    "Reset the remote corpus namespace with its owning backend, then reconfigure and reindex."
+                ),
+            },
+        )
+
+    # Reuse the active settings exactly. Preflight both the embedder and token counter before
+    # entering the reset transaction; an unavailable model/tokenizer cannot destroy the corpus.
+    embed_settings = _embed_settings()
+    text_chunk_settings = _chunk_settings()
+    file_chunk_settings = _structured_chunk_settings()
+    try:
+        embedder = get_cached_embedder(embed_settings)
+        token_counter = embedder.token_counter()
+    except Exception as exc:  # noqa: BLE001 — expose only the safe exception type
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "embedder_preflight_failed",
+                "error_type": type(exc).__name__,
+                "owner_action": "Restore the configured embedder/tokenizer before retrying the reset.",
+            },
+        ) from exc
+    embedding_dimension = resolve_embedding_dimension(configured_dimension=embedder.dim or embed_settings.dim)
+
+    try:
+        with _index_lock, locked_index_instance(_index_instance_id_path(), create=False) as lease:
+            # Embedding configuration is mutable through the sibling admin route. Refuse a
+            # preflight snapshot that changed while this request waited for the reset lock.
+            if (
+                _index_settings() != index_settings
+                or _embed_settings() != embed_settings
+                or _chunk_settings() != text_chunk_settings
+                or _structured_chunk_settings() != file_chunk_settings
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "index_reset_configuration_changed_retry",
+                        "retryable": True,
+                        "owner_action": "Refresh the current signature and retry with new preconditions.",
+                    },
+                )
+
+            previous_instance_id = lease.instance_id
+            receipt_untrusted = False
+            try:
+                previous_receipt = load_index_build_receipt(_index_build_receipt_path())
+            except RuntimeError as exc:
+                # A malformed receipt is one reason this recovery endpoint exists. It cannot be
+                # treated as authoritative, so preserve a configured partial snapshot instead.
+                logger.warning("Ignoring unreadable build receipt during explicit reset: %s", type(exc).__name__)
+                previous_receipt = None
+                receipt_untrusted = True
+
+            if (
+                previous_receipt is not None
+                and previous_receipt.index_signature.index_instance_id != previous_instance_id
+            ):
+                # The receipt describes another corpus generation. Preserve it on disk until
+                # the transaction commits, but never use its foreign identity for reset CAS.
+                previous_receipt = None
+                receipt_untrusted = True
+
+            if previous_receipt is not None:
+                previous_signature = previous_receipt.index_signature.to_dict()
+                previous_signature_source: Literal["persisted_build", "configured_partial"] = "persisted_build"
+                accepted_fingerprints = {str(previous_signature["compatibility_fingerprint"])}
+            else:
+                try:
+                    previous_state = IndexState.load(_state_path())
+                except RuntimeError as exc:
+                    logger.warning("Ignoring unreadable index state during explicit reset: %s", type(exc).__name__)
+                    previous_state = IndexState()
+                previous_dimension = resolve_embedding_dimension(
+                    persisted_actual_dimension=(previous_state.embed or {}).get("actual_dim"),
+                    configured_dimension=embedding_dimension,
+                )
+                previous_configured_signature = _index_signature_payload(
+                    index_settings=index_settings,
+                    embed_settings=embed_settings,
+                    embedding_dimension=previous_dimension,
+                    index_instance_id=previous_instance_id,
+                    # Match the offline partial snapshot from /api/config. Runtime token-
+                    # counter evidence belongs to the new signature produced below.
+                    structured_token_counter=None,
+                    text_chunk_settings=text_chunk_settings,
+                    file_chunk_settings=file_chunk_settings,
+                    signature_complete=False,
+                    index_schema_version=previous_state.version,
+                )
+                previous_signature = _index_signature_payload(
+                    index_settings=index_settings,
+                    embed_settings=embed_settings,
+                    embedding_dimension=previous_dimension,
+                    index_instance_id=previous_instance_id,
+                    structured_token_counter=token_counter,
+                    text_chunk_settings=text_chunk_settings,
+                    file_chunk_settings=file_chunk_settings,
+                    signature_complete=False,
+                    index_schema_version=previous_state.version,
+                )
+                previous_signature_source = "configured_partial"
+                accepted_fingerprints = {
+                    str(previous_configured_signature["compatibility_fingerprint"]),
+                    str(previous_signature["compatibility_fingerprint"]),
+                }
+
+            if payload.expected_index_instance_id != previous_instance_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "index_reset_precondition_failed",
+                        "field": "index_instance_id",
+                        "retryable": True,
+                        "owner_action": "Refresh the current signature and review the changed corpus before retrying.",
+                    },
+                )
+            if payload.expected_compatibility_fingerprint is None and not receipt_untrusted:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "index_reset_precondition_failed",
+                        "field": "compatibility_fingerprint",
+                        "retryable": True,
+                        "owner_action": (
+                            "Provide the current compatibility fingerprint; null is only valid "
+                            "when no trustworthy receipt exists."
+                        ),
+                    },
+                )
+            if (
+                payload.expected_compatibility_fingerprint is not None
+                and payload.expected_compatibility_fingerprint not in accepted_fingerprints
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "index_reset_precondition_failed",
+                        "field": "compatibility_fingerprint",
+                        "retryable": True,
+                        "owner_action": "Refresh the current signature and review the changed corpus before retrying.",
+                    },
+                )
+
+            new_instance_id = _reset_index(
+                index_settings,
+                lease=lease,
+                new_embed_settings=embed_settings,
+                persist_embed_override=False,
+            )
+            new_signature = _index_signature_payload(
+                index_settings=index_settings,
+                embed_settings=embed_settings,
+                embedding_dimension=embedding_dimension,
+                index_instance_id=new_instance_id,
+                structured_token_counter=token_counter,
+                text_chunk_settings=text_chunk_settings,
+                file_chunk_settings=file_chunk_settings,
+                signature_complete=False,
+            )
+    except HTTPException:
+        raise
+    except IndexResetPartialFailure as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "index_reset_partial_failure",
+                "error_type": type(exc).__name__,
+                "active_identity_invalidated": True,
+                "owner_action": "Inspect and restore the index volume before serving retrieval or indexing.",
+            },
+        ) from exc
+    except UnsupportedIndexResetError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "index_reset_backend_unsupported",
+                "backend": backend_name,
+                "retryable": False,
+                "owner_action": (
+                    "Reset the remote corpus namespace with its owning backend, then reconfigure and reindex."
+                ),
+            },
+        ) from exc
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "index_reset_failed",
+                "error_type": type(exc).__name__,
+                "active_identity_invalidated": False,
+                "owner_action": "Resolve the local index-volume error and retry with refreshed preconditions.",
+            },
+        ) from exc
+
+    return IndexResetResponse(
+        index_reset=True,
+        previous_index_instance_id=previous_instance_id,
+        previous_index_signature=previous_signature,
+        previous_index_signature_source=previous_signature_source,
+        new_index_instance_id=new_instance_id,
+        index_signature=new_signature,
+        index_signature_source="configured_partial",
+        engine_version=get_engine_version(),
+    )
 
 
 def _hybrid_retrieve_response(
@@ -949,9 +1260,14 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
     chunks immediately — reads and writes share one hot in-memory backend under _index_lock.
     """
     _check_token(authorization)
-    embed_settings = _embed_settings()
-    index_settings = _index_settings()
-    chunk_settings = _chunk_settings()
+    # Snapshot the corpus generation and every signature-shaping setting before off-lock
+    # chunking/embedding. The final write lease rejects work that crossed a reset.
+    with locked_index_instance(_index_instance_id_path(), create=False) as snapshot_lease:
+        expected_instance_id = snapshot_lease.instance_id
+        embed_settings = _embed_settings()
+        index_settings = _index_settings()
+        chunk_settings = _chunk_settings()
+        structured_chunk_settings = _structured_chunk_settings()
 
     kb_relpath = f"{payload.workspace_id}/{payload.document_id}"
     doc_id = path_id(kb_relpath)
@@ -983,10 +1299,33 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
     with _embed_lock:
         items: list[EmbeddedChunk] = list(embed_chunks(iter(chunks), settings=embed_settings, embedder=embedder))
 
-    with _index_lock, locked_index_instance(_index_instance_id_path(), create=True) as lease:
+    with _index_lock, locked_index_instance(_index_instance_id_path(), create=False) as lease:
+        if lease.instance_id != expected_instance_id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "index_generation_changed_retry",
+                    "retryable": True,
+                    "owner_action": "Retry indexing against the current corpus generation.",
+                },
+            )
+        if (
+            _embed_settings() != embed_settings
+            or _index_settings() != index_settings
+            or _chunk_settings() != chunk_settings
+            or _structured_chunk_settings() != structured_chunk_settings
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "index_configuration_changed_retry",
+                    "retryable": True,
+                    "owner_action": "Refresh readiness and retry indexing with the current configuration.",
+                },
+            )
+        if lease.instance_id is None:
+            lease.publish_new()
         assert lease.instance_id is not None
-        if _embed_settings() != embed_settings or _index_settings() != index_settings:
-            raise HTTPException(status_code=409, detail="index_configuration_changed_retry")
         previous_receipt = load_index_build_receipt(_index_build_receipt_path())
         idx = _current_backend()  # hot backend; load is amortized across posts
         persisted_actual_dimension = (idx.state.embed or {}).get("actual_dim")
@@ -1005,6 +1344,8 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
             embedding_dimension=embedding_dimension,
             index_instance_id=lease.instance_id,
             structured_token_counter=token_counter,
+            text_chunk_settings=chunk_settings,
+            file_chunk_settings=structured_chunk_settings,
             index_schema_version=idx.state.version,
         )
         if previous_receipt is None and (len(idx) > 0 or bool(idx.state.docs)):
@@ -1031,6 +1372,8 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
             embedding_dimension=embedding_dimension,
             index_instance_id=lease.instance_id,
             structured_token_counter=token_counter,
+            text_chunk_settings=chunk_settings,
+            file_chunk_settings=structured_chunk_settings,
             index_schema_version=index_schema_version,
         )
         pipeline = {
@@ -1077,14 +1420,20 @@ def index_file_endpoint(
     (embedding holds the separate ``_embed_lock``). Errors are redacted (no document text).
     """
     _check_token(authorization)
+    # Snapshot generation/settings before parsing and embedding outside the mutation lock.
+    with locked_index_instance(_index_instance_id_path(), create=False) as snapshot_lease:
+        expected_instance_id = snapshot_lease.instance_id
+        embed_settings = _embed_settings()
+        index_settings = _index_settings()
+        text_chunk_settings = _chunk_settings()
+        structured_chunk_settings = _structured_chunk_settings()
+
     raw = file.file.read()
     if not raw:
         raise HTTPException(status_code=422, detail="empty file")
     if len(raw) > MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail=f"file exceeds {MAX_FILE_BYTES} bytes")
 
-    embed_settings = _embed_settings()
-    index_settings = _index_settings()
     source = DocumentSource(
         document_id=document_id,
         filename=filename or file.filename or document_id,
@@ -1109,7 +1458,7 @@ def index_file_endpoint(
 
     t1 = time.perf_counter()
     token_counter = make_token_counter(embed_settings)
-    chunks = chunk_parsed_document(parsed, settings=_structured_chunk_settings(), token_counter=token_counter)
+    chunks = chunk_parsed_document(parsed, settings=structured_chunk_settings, token_counter=token_counter)
     timings["chunk_ms"] = int((time.perf_counter() - t1) * 1000)
 
     kb_relpath = f"{workspace_id}/{document_id}"
@@ -1131,10 +1480,33 @@ def index_file_endpoint(
     timings["embed_ms"] = int((time.perf_counter() - t2) * 1000)
 
     t3 = time.perf_counter()
-    with _index_lock, locked_index_instance(_index_instance_id_path(), create=True) as lease:
+    with _index_lock, locked_index_instance(_index_instance_id_path(), create=False) as lease:
+        if lease.instance_id != expected_instance_id:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "index_generation_changed_retry",
+                    "retryable": True,
+                    "owner_action": "Retry indexing against the current corpus generation.",
+                },
+            )
+        if (
+            _embed_settings() != embed_settings
+            or _index_settings() != index_settings
+            or _chunk_settings() != text_chunk_settings
+            or _structured_chunk_settings() != structured_chunk_settings
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "index_configuration_changed_retry",
+                    "retryable": True,
+                    "owner_action": "Refresh readiness and retry indexing with the current configuration.",
+                },
+            )
+        if lease.instance_id is None:
+            lease.publish_new()
         assert lease.instance_id is not None
-        if _embed_settings() != embed_settings or _index_settings() != index_settings:
-            raise HTTPException(status_code=409, detail="index_configuration_changed_retry")
         previous_receipt = load_index_build_receipt(_index_build_receipt_path())
         idx = _current_backend()
         persisted_actual_dimension = (idx.state.embed or {}).get("actual_dim")
@@ -1153,6 +1525,8 @@ def index_file_endpoint(
             embedding_dimension=embedding_dimension,
             index_instance_id=lease.instance_id,
             structured_token_counter=token_counter,
+            text_chunk_settings=text_chunk_settings,
+            file_chunk_settings=structured_chunk_settings,
             index_schema_version=idx.state.version,
         )
         if previous_receipt is None and (len(idx) > 0 or bool(idx.state.docs)):
@@ -1179,6 +1553,8 @@ def index_file_endpoint(
             embedding_dimension=embedding_dimension,
             index_instance_id=lease.instance_id,
             structured_token_counter=token_counter,
+            text_chunk_settings=text_chunk_settings,
+            file_chunk_settings=structured_chunk_settings,
             index_schema_version=index_schema_version,
         )
         parser_pipeline: dict[str, object] = {
