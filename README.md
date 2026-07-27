@@ -473,3 +473,7 @@ Open `http://127.0.0.1:8080`.
 
 Use `--model fake:grounded` when you need a deterministic no-network smoke test.
 If Ollama times out on the first request, warm it with `ollama run llama3.2:3b "Say ready"` and retry with a larger `--timeout`, smaller `--max-tokens`, smaller `--max-context-chars`, or lower `--k`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
