@@ -8,6 +8,8 @@ What’s implemented today:
 
 ---
 
+<img src="https://github.com/slimx-ai/SlimX-RAG/blob/main/site/assets/slimx-rag-architecture.gif" />
+
 ## Install
 
 This project is packaged as `slimx-rag` and ships a CLI command **`slimx-rag`**.
