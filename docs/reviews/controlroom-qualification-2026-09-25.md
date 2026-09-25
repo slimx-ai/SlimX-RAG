@@ -1,0 +1,418 @@
+# SlimX-RAG ControlRoom qualification audit — 2026-09-25
+
+**Provenance:** AUTHOR-SIDE / SAME-MODEL REVIEW — NOT INDEPENDENT REVIEW. Written by the
+implementing session (Claude Fable 5.1) for the SlimX-RAG → ControlRoom qualification program.
+Every finding below carries executed evidence unless marked "read-only". Independent source review
+belongs to Codex or a human and has not happened at the time of writing.
+
+## 1. Identities
+
+| Item | Value |
+| --- | --- |
+| ControlRoom-pinned SlimX-RAG source (old) | `8ebcb276cc7c6e2df09ec15976a73c7173e23c1a` (= tag `v0.2.8`) |
+| SlimX-RAG program base (= `origin/main` at 2026-09-25 10:22 UTC) | `eb365f7be5b6051fb75ed7253d212963e8dc820d` |
+| Delta `8ebcb276..eb365f7b` | 3 commits: `b88a6f7` licensing/packaging (MIT `LICENSE`, PEP 639 `license = "MIT"`, hatchling floor `>=1.27.0`), `e64022a` website (`site/`, Pages workflow), `eb365f7` README. No runtime, test, dependency-range, release-infrastructure or Docker change. The candidate is therefore based on current `main`; the packaging change only affects wheel metadata. |
+| Benchmark commits (this program, before any behavior change) | `6e8f9548` (benchmark + frozen gate), `dbc1829` (gate serializer) |
+| ControlRoom base | `e634d6bb19a980566d71a62880fc06813e8102df` (post-#183 `main`) |
+| ControlRoom's reviewed SlimX source | `e4b7ca30f9b528df477672cfa5911c69b722a556` |
+| Audit environment | Python 3.12, torch 2.7.1+cpu, sentence-transformers 3.4.1, faiss-cpu 1.15.1, pypdf, python-docx; `HF_HUB_OFFLINE=1`; no GPU; local worktree venv |
+| Baseline checks at `eb365f7b` | `pytest` 242 passed; `ruff check` clean; `ruff format --check` would reformat 25 files (format is not a CI gate); `mypy` 10 errors in `embed/embedder.py` **only when the `hf` extra is installed** (CI installs the dev group without extras, so CI mypy passes) |
+
+## 2. Method and limits
+
+- Complete read of `src/slimx_rag` (server, retrieval, chunking, parsers, index backends, signature,
+  embedder, answer generator, eval) and of ControlRoom's `services/rag/*`, `routes_rag.py`,
+  `indexing_service.py`, `document_cleanup.py`, `document_extraction.py`, Compose and release files.
+- Executed experiments against the real FastAPI app (in-process `TestClient`, `hash` embedder unless
+  stated): scope/tenancy (`scope_experiments.py`), deletion crash window, request bounds, binary
+  ingestion, malformed persisted state, embedder device/model failures
+  (`lifecycle_experiments.py`, `failure_experiments.py`), concurrency and corpus-size scaling
+  (`concurrency_scale.py`). Scripts and outputs are preserved in the evidence root under `01-audit/`.
+- The ControlRoom qualification benchmark (`src/slimx_rag/eval/qualification`, 28 synthetic
+  documents, 71 gold cases, real PDF/DOCX) was run with both the deterministic `hash` embedder and the
+  CPU release embedder `sentence-transformers/all-MiniLM-L6-v2` (resolved commit
+  `c9745ed1d9f207416be6d2e6f8de32d1f16199bf`).
+- A multi-agent audit workflow was attempted twice and terminated both times by the account's
+  subagent session limit; only the answer/citation finder completed. Its findings were re-verified
+  by the author before inclusion (marked "G-finder").
+- Not exercised: Qdrant/pgvector against real servers (fake clients only, as in the test suite),
+  OpenAI embeddings, GPU, the CLI pipeline beyond `run`/`ask` smoke, the demo UI in a browser.
+
+## 3. Summary
+
+| Severity | Count | IDs |
+| --- | --- | --- |
+| Critical | 0 | — |
+| High | 3 | 001, 002, 003 |
+| Medium | 11 | 004–014 |
+| Low | 15 | 015–029 |
+| Informational | 8 | 030–037 |
+
+No cross-workspace, cross-project or forbidden-document leak was observed in any scoped retrieval
+(0 of 425 returned chunks over 71 gold cases with both embedders; 0 in the adversarial scope
+experiments). The High findings concern retrievability of text-ingested documents, mutable runtime
+model identity, and non-authoritative deletion after a lost state commit.
+
+Answers to the section-7 review targets are in §6.
+
+## 4. Findings
+
+Fields: path/function · observed · reproduction · consequence (product / security / quality) ·
+smallest sound disposition · class (merge blocker / release blocker / later improvement).
+
+### RAG-AUD-001 — High — Text-ingested documents contribute at most one chunk per retrieval
+- `server/app.py::_to_chunk_record` + `retrieval/hybrid.py::_group_by_parent`.
+- Observed (G-finder, re-verified): chunks produced by `/api/index` carry no `parent_id`/`section`,
+  so `_to_chunk_record` falls back to `parent_id = doc_id` and `section = None`; grouping admits one
+  primary per parent and drops every sibling with the same (`None`) section. An 8-chunk text document
+  scoped to itself returned exactly 1 chunk for `top_k=10` (`fused_candidates: 8, final_count: 1`).
+- Reproduction: `POST /api/index` with ~6 KB of text, `POST /api/retrieve` scoped to that document.
+- Consequence: ControlRoom's degraded text fallback (`index_document`) and any host using the text
+  path can never surface more than one passage of a document per question; multi-part answers are
+  structurally unreachable. Security: none. Quality: high.
+- Disposition: give flat-text chunks a per-chunk parent identity at index time
+  (`parent_id = f"{doc_id}#c{chunk_index}"`, `ordinal` stored) so grouping treats them as distinct
+  parents; add a server test asserting a multi-chunk text document returns more than one chunk.
+- Class: release blocker.
+
+### RAG-AUD-002 — High — Runtime embedding-model identity is mutable
+- `embed/embedder.py::HuggingFaceEmbedder.__init__` (revision passed only when configured),
+  `Dockerfile` (model downloaded at build without a revision), `docker-entrypoint.sh` (no
+  `HF_HUB_OFFLINE`).
+- Observed (read-only + local run): the service loads `sentence-transformers/all-MiniLM-L6-v2` at
+  the mutable `main` revision. With hub egress available, a newer `main` would be downloaded at
+  startup and the signature's `embedding_runtime_identity` would change; the signature correctly
+  *detects* this (every document then needs reindex) but the published image would no longer be the
+  artifact that was qualified. Offline, the cached snapshot resolves to `c9745ed1…`.
+- Consequence: release identity of the image is not the runtime identity; a fleet-wide
+  `needs_reindex` can be triggered by an upstream model push. Security: supply-chain integrity.
+- Disposition: pin the revision (`RAG_HF_REVISION` → `EmbedSettings.revision`) to the exact commit
+  in the image, set `HF_HUB_OFFLINE=1` in the image environment, and fail the build if the baked
+  snapshot's commit differs from the pin.
+- Class: release blocker (build hardening).
+
+### RAG-AUD-003 — High — Deletion and replacement are not authoritative after a lost state commit
+- `index/base.py::delete_doc/commit_doc_state`, `server/app.py::delete_document_endpoint`,
+  `index_endpoint`, `index_file_endpoint`.
+- Observed (executed): the index file is saved before `index_state.json` is committed by design.
+  Simulating the crash window (state entry lost, service restarted): `DELETE` returned
+  `deleted_chunks: 0, total: 1` and the document stayed retrievable while the chunk listing reported
+  0; a changed-content re-index of the same document id then left the **old version retrievable next
+  to the new one** ("Version one…" and "Version two…" both returned).
+- Consequence: after any crash between save and commit, a later update leaves stale text of a
+  *live* document retrievable under its real `document_id`, which ControlRoom's host-side
+  `document_ids` filter cannot reject (the id is legitimate); a deleted document's content is
+  retained on disk and remains retrievable by the service. Security: data retention of deleted
+  content. Quality: stale answers.
+- Disposition: on backends that can enumerate their corpus, make `delete_doc` authoritative by also
+  sweeping every stored chunk whose metadata `doc_id` matches (union with the state's `chunk_ids`);
+  use the same sweep for the replace step of both index endpoints; report `swept_chunks` separately
+  from bookkeeping. Add tests for the crash window.
+- Class: release blocker.
+
+### RAG-AUD-004 — Medium — Ambiguous document identity across workspaces
+- `server/app.py::index_endpoint/index_file_endpoint/document_chunks_endpoint/delete_document_endpoint`
+  (`doc_id = path_id(f"{workspace_id}/{document_id}")`).
+- Observed (executed): `(workspace_id="a/b", document_id="c")` and `("a", "b/c")` produce the same
+  `doc_id`; the second index replaced the first document's chunks (its workspace tag became `a`), and
+  ids containing `/` cannot be listed or deleted through the path endpoints (404).
+- Consequence: with free-form ids a tenant can overwrite another tenant's document. ControlRoom sends
+  UUIDs, so it is not affected today; the service contract is unsafe for arbitrary hosts.
+- Disposition: reject `workspace_id`/`document_id` containing `/`, or empty/whitespace-only, with
+  422 on every endpoint (backward compatible for every id that worked end to end).
+- Class: merge blocker.
+
+### RAG-AUD-005 — Medium — Empty or absent workspace scope silently widens retrieval
+- `server/app.py::_hybrid_retrieve_response`, `retrieval/retriever.py::retrieve`.
+- Observed (executed): `workspace_id: ""` and `workspace_id: null` return the whole corpus across
+  tenants; `document_ids: []` is treated as "no document filter"; `document_ids` without
+  `workspace_id` returns another workspace's document by id.
+- Consequence: a host bug that sends an empty scope turns into a cross-tenant read; nothing in the
+  service can be configured to refuse it. ControlRoom always sends both and post-validates every
+  returned chunk against its eligible set, so the product is defended in depth, but the service
+  boundary is permissive.
+- Disposition: 422 for empty-string `workspace_id`, empty `document_ids` and empty entries; add
+  `RAG_REQUIRE_WORKSPACE_SCOPE=1` (400 `workspace_scope_required` when `workspace_id` is absent) for
+  multi-tenant deployments and set it in ControlRoom's Compose; document that `document_ids` narrows a
+  workspace, never replaces it.
+- Class: merge blocker (validation); release blocker (mode adoption in ControlRoom).
+
+### RAG-AUD-006 — Medium — Lexical candidates are consumed by out-of-scope chunks
+- `server/app.py::_current_lexical` (corpus-global BM25), `retrieval/hybrid.py::HybridRetriever.retrieve`.
+- Observed (executed): with tenant B scoped and tenant A holding 40 matching documents, the trace
+  reported `lexical_candidates: 30` while zero lexical candidates were in scope; the response still
+  said `strategy: hybrid`. Dense candidates are scope-filtered before slicing; lexical ones are not.
+- Consequence: in a multi-workspace index the lexical half of hybrid retrieval degrades to nothing for
+  small tenants, and the trace discloses how many other tenants' chunks matched.
+- Disposition: score lexically, filter to scope, then slice to `lexical_candidates`; report in-scope
+  counts only.
+- Class: release blocker (measured quality + trace honesty).
+
+### RAG-AUD-007 — Medium — `final_parents` caps results below the requested `top_k`
+- `settings.py::RetrievalSettings.final_parents = 6`, `server/app.py::_hybrid_retrieve_response`.
+- Observed (benchmark): ControlRoom requests `top_k=8`; the mean result count was 5.99 in both
+  embedder runs because at most six distinct parents are admitted. The maintenance-log answer
+  (`upd-043*`) never reached the eight returned chunks.
+- Consequence: the host receives fewer passages than it budgets for; three gold lifecycle cases fail.
+- Disposition: derive the parent cap from the request (`final_parents = max(configured, top_k)`);
+  measure before/after.
+- Class: release blocker (frozen-gate failure).
+
+### RAG-AUD-008 — Medium — Heading-only parents become content-less chunks that win exact boosts
+- `chunk/structured.py::_iter_parents`, `retrieval/hybrid.py` exact boost.
+- Observed (benchmark, `id-006`): a Markdown `# Supply Agreement HR-2026-0042` heading with no body
+  before the next heading becomes its own chunk; the identifier match on its title gave it top-1 with
+  no content, pushing the `Term` section down.
+- Disposition: skip emitting a chunk for a parent that contains only heading/title elements when the
+  document has other content (the heading survives in the children's `section_path` and title).
+- Class: release blocker (locator gate).
+
+### RAG-AUD-009 — Medium — The catch-all text parser accepts binary and HTML originals
+- `document/parsers/text.py::TextParser.supports` (always true), `document/structure.py::detect_source_type`.
+- Observed (executed): an xlsx-like zip and a PNG posted to `/api/index/file` returned 200 with
+  `parser: native-text` (79 chunks of control characters for the PNG, title `�PNG`); a corrupt PDF
+  correctly returned 422. ControlRoom uploads `.html/.htm` and extracts their text itself, but sends
+  the original bytes, which SlimX-RAG indexes as raw markup.
+- Consequence: garbage or markup enters the index as a successful document; ControlRoom's fallback
+  to its own extracted text only triggers on 422 `parse_failed`.
+- Disposition: fail closed for non-text content (NUL bytes / high replacement ratio) and for
+  HTML/unknown binary types with 422 `parse_failed: UnsupportedDocumentError`, so ControlRoom falls
+  back to its extracted text.
+- Class: release blocker.
+
+### RAG-AUD-010 — Medium — Unstructured 500 responses on invalid state or embedder failure
+- `server/app.py::retrieve_endpoint/index_endpoint/index_file_endpoint`.
+- Observed (executed): corrupt `index_state.json` → `/ready` 503 `index_state_invalid` but
+  `/api/retrieve` 500; truncated index line → `backend_load_failed` vs retrieve 500; corrupt receipt →
+  `/api/index` 500; `RAG_EMBED_DEVICE=cuda` on a CPU host or an uncached model offline →
+  `embedder_init_failed` vs `/api/index` 500.
+- Consequence: ControlRoom records "SlimX-RAG returned 500" as a plain failure instead of the
+  maintenance state readiness already knows; its per-request readiness probe limits exposure to races.
+- Disposition: map these known failures to structured 503/409 codes identical to the `/ready` reasons.
+- Class: merge blocker (cheap, contract hygiene).
+
+### RAG-AUD-011 — Medium — `/api/ask` and `/api/eval/run` use a different retrieval path than `/api/retrieve`
+- `server/app.py::ask_endpoint/eval_endpoint`, `retrieval/retriever.py::retrieve`.
+- Observed (G-finder, re-verified): the legacy dense-only path returns different chunks for the same
+  question and labels them `[kb_relpath:index]` (`None` for non-paginated files) with identity-prefixed
+  embedding text. ControlRoom uses `/api/retrieve` only and is unaffected; the demo UI uses `/api/ask`.
+- Disposition: make the hybrid path the single retrieval owner (`/api/ask` and eval build their
+  `RetrievalResult` from hybrid results and hybrid citation labels); keep the host boundary unchanged.
+- Class: release blocker (one canonical retrieval owner), low risk.
+
+### RAG-AUD-012 — Medium — Caller-controlled model provider and dataset path on demo endpoints
+- `server/app.py::ask_endpoint/eval_endpoint` (`payload.model`, `payload.dataset`).
+- Observed (read-only): any caller with the service token (or anyone when no token is configured)
+  selects the LLM provider (`openai:`/`anthropic:` egress with the server's credentials) and points
+  `/api/eval/run` at an arbitrary server file path (existence oracle, JSONL parse errors).
+- Consequence: cost/egress and filesystem probing on a service that ControlRoom deploys without a host
+  port and without cloud keys; standalone deployments are exposed.
+- Disposition: restrict `dataset` to a configured directory (`RAG_EVAL_DATASET_DIR`, default
+  `examples/`) and honour `model` only when `RAG_ALLOW_MODEL_OVERRIDE=1`.
+- Class: merge blocker.
+
+### RAG-AUD-013 — Medium — Whole-index rewrite per mutation on the local backend
+- `index/local.py::save`, `server/app.py` mutation endpoints (all under `_index_lock`).
+- Observed (executed, hash embedder, ~8 chunks/doc): see §7 for the measured table. Every `/api/index`
+  and `DELETE` rewrites the complete JSONL file (384 floats per chunk as text) under the lock that
+  reads also take; the first retrieval after a write rebuilds BM25 over the corpus.
+- Consequence: throughput and latency degrade linearly with corpus size; acceptable for the
+  workspace sizes ControlRoom targets today, unacceptable without a boundary statement.
+- Disposition: document the measured boundary for the local backend in ControlRoom's knowledge-engine
+  doc; no storage-format change in this program.
+- Class: later improvement (boundary must be documented for release).
+
+### RAG-AUD-014 — Medium — Mutable and unlocked image build inputs
+- `Dockerfile`, `.github/workflows/publish-image.yaml`, `.gitignore` (`uv.lock` ignored),
+  `pyproject.toml` ranges.
+- Observed (read-only): `python:3.12-slim` by tag; `pip install uv` unversioned; CPU torch unpinned;
+  no committed lock; `slimx @ git+https://github.com/slimx-ai/slimx.git` from a moving branch (only
+  `/api/ask` with real models imports `slimx`); model baked without revision; git left in the image;
+  no OCI labels, SBOM or provenance; the publish workflow always builds CPU and GPU and moves `latest`;
+  CI type-checks without the `hf`/`doc` extras.
+- Disposition: base image by digest, pinned `uv`, committed `uv.lock` honoured with `--frozen`,
+  exact torch CPU version, SlimX from the reviewed archive `e4b7ca30…`, pinned model revision and
+  offline runtime, OCI labels, SBOM/provenance, a CPU-only `candidate-<sha>` publication path that never
+  touches GPU or `latest`.
+- Class: release blocker (build hardening).
+
+### RAG-AUD-015 — Low — Caller metadata can forge citation fields on `/api/index`
+Executed: `metadata: {page: 9, section: "Forged", parent_id: "p#1", source_title: "Forged Title"}` →
+citation `[Forged Title, p. 9, Forged]`. `workspace_id`/`document_id` cannot be overridden (identity
+keys are set first). Disposition: strip reserved keys (`page`, `section`, `section_path`,
+`parent_id`, `source_title`, `entry`, `page_type`, `chunk_id`, `workspace_id`, `document_id`) from
+caller metadata. Merge blocker (trivial).
+
+### RAG-AUD-016 — Low — Underscore identifiers are split by the lexical tokenizer
+`retrieval/tokenize.py::_TOKEN_RE` keeps `.,-/` but not `_`, so `MAX_PAYLOAD_KG` becomes three
+common tokens (benchmark `code-064`: a safety-manual page outranked the controller source).
+Disposition: keep `_` as an internal separator; measure. Later improvement, measured in this program.
+
+### RAG-AUD-017 — Low — Unbounded request fields
+Executed: a 2 MB question, `top_k=10**9`, an empty question and 200 000 `document_ids` are all
+accepted (97 ms for the 2 MB question with the hash embedder). Disposition: bound `question` length,
+`top_k` and `document_ids` count with 422. Merge blocker (trivial).
+
+### RAG-AUD-018 — Low — Trace discloses out-of-scope match counts
+Resolved by RAG-AUD-006.
+
+### RAG-AUD-019 — Low — Parsers override the caller-supplied title (G-finder)
+Markdown/DOCX/text parsers prefer an inferred heading over `metadata.title`; only PDF honours the
+caller. Disposition: prefer the caller title when present. Later improvement (done with the citation
+hygiene change if cheap).
+
+### RAG-AUD-020 — Low — Citation label omits the section when it equals the entry (G-finder)
+Non-paginated documents get no locator in the label although `metadata.section` is correct.
+Disposition: include the section whenever it differs from the source title. Later improvement.
+
+### RAG-AUD-021 — Low — Chunk listing returns embedding text and title-as-section (G-finder)
+`/api/documents/{id}/chunks` returns the identity-prefixed embedding text, reports the title as
+`section` for flat-text chunks and never fills offsets. Disposition: return `display_text`, `section`
+only. Later improvement.
+
+### RAG-AUD-022 — Low — Answer generator truncates mid-sentence and lists unshown citations (G-finder)
+Demo path only; ControlRoom generates its own answers. Later improvement.
+
+### RAG-AUD-023 — Low — `fake:grounded` relevance heuristic and a dead eval branch (G-finder)
+Later improvement.
+
+### RAG-AUD-024 — Low — `score` is an RRF value while ControlRoom's `min_score` is a 0..1 threshold (G-finder)
+Observed: fusion scores are ~0.016–0.53 (rank-based plus boosts); the benchmark shows no-answer
+questions are not separable from answered ones by top-1 score. Disposition: document the scale in the
+contract and in ControlRoom's `rag_min_score` help text; ControlRoom's default `0.0` is correct.
+
+### RAG-AUD-025 — Low — mypy is green only without the `hf` extra
+With sentence-transformers installed, `embedder.py:253` fails on the `**kwargs` typing. Disposition:
+type the optional `revision` argument explicitly. Merge blocker (trivial).
+
+### RAG-AUD-026 — Low — Misleading tokenizer warnings when measuring oversized parents
+"Token indices sequence length is longer than the specified maximum (736 > 256)" is emitted by the
+counter while measuring a whole parent before splitting; every stored chunk is ≤ 254 tokens (verified
+over the benchmark index, stored `token_count` equals the real count). Disposition: count without the
+warning. Later improvement.
+
+### RAG-AUD-027 — Low — `deleted_chunks: 0` is ambiguous
+Unknown document and lost bookkeeping look identical. Resolved by the sweep in RAG-AUD-003
+(`swept_chunks` reported).
+
+### RAG-AUD-028 — Low — No request logging or ids in service mode
+Later improvement.
+
+### RAG-AUD-029 — Low — Retrieval holds the index lock for the whole hybrid computation
+Reads serialize with each other and with writes (measured in §7). Acceptable at current scale.
+Later improvement.
+
+### Informational
+- **RAG-AUD-030** The exact-match boost (0.5 identity / 0.15 text) dominates RRF scores (~1/61); this is
+  intended for identifiers and produced no pathological ranking in the benchmark.
+- **RAG-AUD-031** BM25 IDF statistics span all tenants (information-theoretic only; no text crosses).
+- **RAG-AUD-032** Flat-text chunks have no page/section locator by construction; documented.
+- **RAG-AUD-033** Scoped retrieval on FAISS/Qdrant/pgvector fails closed with HTTP 400 (verified for
+  FAISS); unscoped retrieval on those backends returns every tenant. ControlRoom's declared topology
+  is the local backend, so this remains the right boundary; backend-native filtering is not required
+  by the topology and is not implemented here.
+- **RAG-AUD-034** Reranking is off by default; the benchmark gives no evidence that it is needed.
+- **RAG-AUD-035** The `(mtime_ns, size)` hot-backend cache token is practically safe on Linux.
+- **RAG-AUD-036** Coverage is 89% overall; least covered: `index/__init__.py` 57%, `ingest/loader.py`
+  64%, `qdrant_backend.py` 74%, `answer/generator.py` 77%. The suite has no multithreaded test and no
+  test for the deletion crash window (added by this program).
+- **RAG-AUD-037** Untitled text documents are cited by their id (ControlRoom always sends a title).
+
+## 5. Verified sound (executed)
+
+- Workspace and document scoping in `_hybrid_retrieve_response`: 0 leaks in 71 gold cases × 2
+  embedders (425 chunks) and in the adversarial experiments; identity keys `workspace_id`/`document_id`
+  cannot be forged through caller metadata.
+- Citation fidelity: every returned chunk's text was found in the attributed document, on the
+  attributed PDF page and under the attributed heading (425/425), and every label agrees with the page
+  metadata.
+- Determinism: identical chunk lists across two passes and after a simulated restart.
+- Delete on a consistent state removes every chunk (chunk listing 0, no stale hits, lagging host scope
+  included); re-indexing the same id with new content replaces the old text.
+- Structured chunker honours the real tokenizer: max stored chunk 254 tokens, stored `token_count`
+  exact.
+- Readiness truth: corrupt state, corrupt receipt, truncated index, mixed dimensions, dimension
+  mismatch, failed embedder init and a missing model each produce a structured 503 reason.
+- Concurrency: 8 threads × 40 mixed index/retrieve/delete operations, 320 × HTTP 200, no exception;
+  afterwards the index file parsed and its chunk ids equalled the state's chunk ids exactly.
+- Auth: constant-time comparison; a missing token yields 401 when a token is configured; `/ready`
+  reports `auth_enabled`.
+- Path traversal: the multipart filename is metadata only; no filesystem path is derived from it.
+- Instance lock: crash-releasing advisory lock plus owner metadata and stale recovery (read-only).
+
+## 6. Section-7 review targets
+
+1. **`/api/retrieve` vs `/api/ask`** — confirmed divergent (RAG-AUD-011); not intentional as a product
+   contract; converge on the hybrid path as the single retrieval owner. ControlRoom is unaffected.
+2. **Scoped retrieval on non-enumerable backends** — fails closed (HTTP 400). The declared ControlRoom
+   topology is the local backend, so this is the right release boundary; no backend-native filtering
+   is added.
+3. **Reranking** — remains off; the frozen gate is met without it after the measured corrections
+   (see §8 for the before/after record); no evidence justifies the added cost.
+4. **Candidate counts** — measured: `dense_candidates=lexical_candidates=30` are adequate for the
+   benchmark corpus (118 chunks) and the 2 000-document experiment; the binding limit was
+   `final_parents` (RAG-AUD-007), not the candidate counts. The lexical budget was wasted across
+   tenants (RAG-AUD-006).
+5. **Deletion consistency** — proven consistent on a healthy state and proven non-authoritative after
+   a lost state commit (RAG-AUD-003). ControlRoom's host-side `document_ids` filter hides a deleted
+   document from users but cannot hide stale text of a live document.
+6. **Project isolation** — SlimX-RAG knows workspace/document only; ControlRoom derives the eligible
+   `document_ids` server-side (`routes_rag.py`, `compatible_document_ids`) and re-validates every
+   returned chunk (`qa_service.perform_retrieval`). The benchmark's workspace-only diagnostic shows
+   what a workspace-only filter would leak (22 cross-project hits over 8 cases), which is why the
+   explicit set is mandatory; `RAG_REQUIRE_WORKSPACE_SCOPE` adds service-side defence in depth.
+
+## 7. Measured scale (local JSONL backend, hash embedder, ~8 chunks per document, one process)
+
+| documents | chunks | index.jsonl | one `/api/index` (replace) | first `/api/retrieve` after a write (BM25 rebuild) | warm `/api/retrieve` | one `DELETE` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100 | 794 | 7.2 MB | 187 ms | 49 ms | 8 ms | 164 ms |
+| 500 | 3 994 | 36.6 MB | 818 ms | 221 ms | 20 ms | 805 ms |
+| 1 000 | 7 975 | 73.2 MB | 1 643 ms | 552 ms | 38 ms | 1 613 ms |
+
+Every mutation rewrites the whole JSONL file and the first read after a write rebuilds the BM25
+sidecar, both linear in corpus size; warm retrieval stays fast. Concurrency: 8 threads × 40 mixed
+index/retrieve/delete operations completed with 320 × HTTP 200 and a consistent index/state
+afterwards. A 2 000-document step of the same run is appended to the evidence root when it
+completes (`01-audit/concurrency_scale.out`).
+
+## 8. Quality baseline and frozen gate
+
+Baseline at `dbc1829` (benchmark commits on top of `eb365f7b`, no behavior change), `top_k=8`:
+
+| Metric | hash | hf (all-MiniLM-L6-v2, CPU) |
+| --- | --- | --- |
+| cases scored | 63 | 63 |
+| hit@1 / hit@3 / hit@5 | 0.635 / 0.762 / 0.810 | 0.905 / 0.937 / 0.952 |
+| MRR / nDCG@8 | 0.710 / 0.729 | 0.921 / 0.921 |
+| exact-identifier hit@1 | 0.941 | 0.941 |
+| top-1 from expected source (46 tagged) | 0.609 | 0.891 |
+| expected locator ok (25 tagged) | 0.680 | 0.920 |
+| multi-document coverage@8 | 0.781 | 1.000 |
+| cross-workspace / cross-project / forbidden leaks | 0 / 0 / 0 | 0 / 0 / 0 |
+| stale deleted hits / stale updated text | 0 / 0 | 0 / 0 |
+| citation wrong source / wrong locator (fidelity, 425 chunks) | 0 / 0 | 0 / 0 |
+| unstable cases / restart inconsistent | 0 / 0 | 0 / 0 |
+| retrieval latency median / p95 | 4 ms / 5 ms | 12–14 ms / 13–17 ms |
+| index time (28 docs, 118 chunks) | 1.2 s | 3.9 s |
+| peak RSS | — | 660 MB |
+
+The frozen gate (`examples/controlroom_qualification/quality-gate.json`, sha256
+`0d506812a63b46384ce8252ceccef8b6c9fa0b15b693caf9469b09a9e66cbd84`) passes every hard invariant
+for both embedders and **fails four checks for the release embedder at baseline**:
+`updated_doc_missing_new_content` 3 (RAG-AUD-007), `expected_locator_failures` 2 (RAG-AUD-008 and
+one paraphrase locator miss), `exact_identifier_hit_at_1` 0.941 (RAG-AUD-016), and
+`top1_expected_source_rate` 0.891 (RAG-AUD-007/016 and one conflicting-evidence case). These are the
+improvement targets; thresholds are not lowered.
+
+## 9. Disposition plan
+
+| Commit | Scope | Findings |
+| --- | --- | --- |
+| correctness/security corrections | authoritative delete/replace sweep; id and scope validation; require-scope mode; binary/HTML rejection; structured failure codes; demo-endpoint restrictions; reserved metadata keys; request bounds; mypy typing | 003, 004, 005, 009, 010, 012, 015, 017, 025 |
+| measured retrieval-quality improvements | text-chunk parent identity; in-scope lexical candidates; top_k-derived parent cap; heading-only parents; underscore identifiers; single retrieval owner; citation/title/chunk-listing hygiene | 001, 006, 007, 008, 011, 016, 019, 020, 021 |
+| build hardening | digest-pinned base, pinned uv/torch, committed lock, reviewed SlimX archive, pinned model revision + offline, labels, SBOM/provenance, CPU-only candidate publication | 002, 014 |
+| docs/evidence/version | changelog, contract docs, boundary statement for 013, version bump | 013, 024, 026–037 |
+
+Deferred with explicit owner acceptance required: 022, 023, 028, 029, and the storage-format change
+behind 013.

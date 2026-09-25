@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 — unreleased (ControlRoom qualification, 2026-09-25)
+## 0.3.0 — 2026-09-25 (ControlRoom qualification candidate; no GitHub release yet)
 
 Audit record: `docs/reviews/controlroom-qualification-2026-09-25.md`. Indexes shaped by earlier
 releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v2`).
@@ -47,6 +47,7 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
 
 ### Added
 
+- `/api/retrieve` responses carry `vector_backend`.
 - `RAG_HF_REVISION` pins the Hugging Face model commit; `RAG_EMBED_QUERY_PREFIX` /
   `RAG_EMBED_DOCUMENT_PREFIX` support asymmetric models.
 - ControlRoom qualification benchmark (`slimx_rag.eval.qualification`,

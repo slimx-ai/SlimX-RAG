@@ -1423,6 +1423,7 @@ def _hybrid_retrieve_response(
         "query": question,
         "chunks": chunks_out,
         "embed": {"provider": embed_settings.provider, "model": model, "dim": embed_settings.dim},
+        "vector_backend": _index_settings().backend,
         "elapsed_ms": elapsed_ms,
         "retrieval_strategy": trace["strategy"],
         "trace": trace,
