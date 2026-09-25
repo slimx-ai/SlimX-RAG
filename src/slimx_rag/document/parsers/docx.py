@@ -196,7 +196,7 @@ class DocxParser:
                 )
             )
 
-        title = doc_title or str(source.metadata.get("title") or "") or _stem(source.filename)
+        title = str(source.metadata.get("title") or "") or doc_title or _stem(source.filename)
         page = ParsedPage(
             page_number=1,
             elements=tuple(elements),

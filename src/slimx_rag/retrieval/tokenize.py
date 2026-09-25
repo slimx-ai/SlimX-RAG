@@ -1,9 +1,9 @@
 """Identifier-aware tokenization, query normalization, and coarse intent detection.
 
 Technical identifiers must survive tokenization: ``K2.6``, ``GLM-5.1``, ``35B-A3B``,
-``68.6``, ``2026-04-20``, ``256,000``, ``MLA``. A token is a run of alphanumerics with
-optional internal separators (``. , - /``), so version numbers and dates stay whole
-instead of being shattered into ``k2`` + ``6``.
+``68.6``, ``2026-04-20``, ``256,000``, ``MLA``, ``MAX_PAYLOAD_KG``. A token is a run of
+alphanumerics with optional internal separators (``. , - / _``), so version numbers, dates and
+code identifiers stay whole instead of being shattered into ``k2`` + ``6`` or ``max`` + ``kg``.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import re
 
 # Internal separators are kept ONLY between alphanumerics, so trailing punctuation is
 # dropped while "k2.6" / "35b-a3b" / "256,000" / "2026-04-20" stay intact.
-_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[.,\-/][A-Za-z0-9]+)*")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[.,\-/_][A-Za-z0-9]+)*")
 
 _TEMPORAL = {
     "when", "date", "dated", "released", "release", "launched", "launch",
@@ -33,7 +33,7 @@ def normalize_query(query: str) -> str:
 def _looks_like_identifier(token_lower: str, raw: str) -> bool:
     if any(c.isdigit() for c in token_lower):
         return True
-    if any(sep in token_lower for sep in (".", "-", "/", ",")):
+    if any(sep in token_lower for sep in (".", "-", "/", ",", "_")):
         return True
     # Short all-caps acronym (e.g. MLA, GLM) — case checked on the raw token.
     return raw.isupper() and 2 <= len(raw) <= 5

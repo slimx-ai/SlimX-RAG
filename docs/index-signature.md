@@ -122,11 +122,18 @@ old corpus identity from today's environment.
 
 Successful indexing responses also include `document_pipeline`:
 
-- `/api/index`: `ingest_mode="text"`, recursive-character chunker, no parser
+- `/api/index` (0.3.0): `ingest_mode="text"`, structured-token chunker, `source_type="text"`,
+  `parser={"name": "native-text", "version": ...}`; its `chunk_config_fingerprint` is the
+  `file_chunk_config_fingerprint`. Releases before 0.3.0 reported the recursive-character chunker
+  with `parser=null` and the `text_chunk_config_fingerprint`.
 - `/api/index/file`: `ingest_mode="file"`, structured-token chunker, actual source type,
   parser name/version, and extraction backend/version
 
-This receipt identifies which of the two chunk fingerprints applies to that document.
+The receipt identifies which chunk fingerprint applies to that document. `index_shaping_version`
+is `index-shaping-v2` from 0.3.0: posted text is parsed and chunked by the structured pipeline
+(every chunk carries parent identity, `page_type`, `section` and `display_text` and embeds the
+identity prefix) and heading-only parents emit no chunk, so indexes shaped by v1 report
+`index_signature_mismatch` and must be rebuilt.
 
 ## Reset behavior
 

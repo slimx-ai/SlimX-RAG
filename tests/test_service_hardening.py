@@ -217,9 +217,10 @@ def test_caller_metadata_cannot_forge_identity_or_locator_fields(client: TestCli
     assert _retrieve(client, "falcon facts", workspace_id="wsY") == []
     chunk = client.post("/api/retrieve", json={"question": "falcon facts", "workspace_id": "wsX"}).json()["chunks"][0]
     assert chunk["chunk_id"] != "forged"
-    assert chunk["metadata"]["page"] is None and chunk["metadata"]["section"] is None
+    assert chunk["metadata"]["page"] is None and chunk["metadata"]["parent_id"] != "p#1"
+    assert chunk["metadata"]["section"] != "Forged"
     assert chunk["metadata"]["source_title"] == "Falcon Notes"
-    assert "Forged" not in chunk["citation"]
+    assert chunk["citation"] == "[Falcon Notes]"
 
 
 # --- RAG-AUD-009: binary and HTML originals --------------------------------------------------

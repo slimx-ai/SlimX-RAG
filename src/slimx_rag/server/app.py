@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ from langchain_core.documents import Document
 from pydantic import BaseModel, Field, field_validator
 
 from slimx_rag.answer import answer
-from slimx_rag.chunk import TokenCounter, chunk_documents, chunk_parsed_document
+from slimx_rag.chunk import TokenCounter, chunk_parsed_document
 from slimx_rag.core.hashing import content_hash, path_id
 from slimx_rag.document import DocumentError, DocumentSource, ParsedDocument, parse_document
 from slimx_rag.embed import EmbeddedChunk, Embedder, embed_chunks, get_cached_embedder, make_token_counter
@@ -37,7 +38,15 @@ from slimx_rag.index import (
     write_index_build_receipt,
 )
 from slimx_rag.index.types import SearchResult
-from slimx_rag.retrieval import Bm25Index, ChunkRecord, HybridRetriever, ScopeNotSupportedError, retrieve
+from slimx_rag.retrieval import (
+    Bm25Index,
+    ChunkRecord,
+    HybridRetriever,
+    RetrievalResult,
+    RetrievedChunk,
+    ScopeNotSupportedError,
+    retrieve,
+)
 from slimx_rag.settings import (
     ChunkSettings,
     EmbedSettings,
@@ -108,6 +117,11 @@ def _embed_settings() -> EmbedSettings:
         hf_model=str(override.get("hf_model") or os.getenv("RAG_HF_MODEL", "sentence-transformers/all-MiniLM-L6-v2")),
         dim=int(dim if dim is not None else os.getenv("RAG_EMBED_DIM", "384")),
         device=override["device"] if "device" in override else (os.getenv("RAG_EMBED_DEVICE") or None),
+        # Immutable model identity for the hf provider: an exact Hugging Face commit. The image
+        # pins it so a mutable `main` can never be adopted at runtime (see docs/deployment.md).
+        revision=str(override.get("revision") or os.getenv("RAG_HF_REVISION") or "") or None,
+        query_prefix=os.getenv("RAG_EMBED_QUERY_PREFIX", ""),
+        document_prefix=os.getenv("RAG_EMBED_DOCUMENT_PREFIX", ""),
     )
 
 
@@ -330,16 +344,29 @@ def _as_int(value: object) -> int:
 def _to_chunk_record(result: SearchResult) -> ChunkRecord:
     md = result.metadata or {}
     page = md.get("page")
+    page_number = page if isinstance(page, int) and not isinstance(page, bool) else None
+    section = str(md["section"]) if md.get("section") is not None else None
+    entry = str(md.get("entry") or "")
+    parent_id = str(md.get("parent_id") or md.get("parent_doc_id") or md.get("doc_id") or result.chunk_id)
+    ordinal = md.get("ordinal")
+    if (section is None or section == entry) and isinstance(ordinal, int) and not isinstance(ordinal, bool):
+        # Parent grouping collapses field views of one entity (a fact sheet's fields), never
+        # consecutive prose passages of one page/section: each narrative child is its own
+        # parent, so a long unstructured document can contribute several passages.
+        parent_id = f"{parent_id}#o{ordinal}"
     return ChunkRecord(
         chunk_id=result.chunk_id,
         text=result.text,
-        parent_id=str(md.get("parent_id") or md.get("parent_doc_id") or md.get("doc_id") or result.chunk_id),
-        page_number=page if isinstance(page, int) and not isinstance(page, bool) else None,
-        section=str(md["section"]) if md.get("section") is not None else None,
+        parent_id=parent_id,
+        page_number=page_number,
+        section=section,
         page_type=str(md.get("page_type") or "unknown"),
         source_title=str(md.get("source_title") or md.get("title") or ""),
-        entry=str(md.get("entry") or ""),
+        entry=entry,
         token_count=_as_int(md.get("token_count")),
+        # A heading path, a page of a paginated document or a field label locates the passage;
+        # the inferred first line of an unpaginated text document does not.
+        section_is_locator=bool(md.get("section_path")) or page_number is not None or (section != entry),
     )
 
 
@@ -1311,7 +1338,12 @@ def _hybrid_retrieve_response(
 
     meta_cache: dict[str, dict[str, object]] = {}
     record_cache: dict[str, ChunkRecord | None] = {}
+    top_k = payload.top_k or _index_settings().top_k
     settings = _retrieval_settings()
+    if top_k > settings.final_parents:
+        # The caller's top_k is the budget; the configured parent cap is only a floor. Otherwise
+        # a request for eight passages silently received at most six distinct parents.
+        settings = dataclasses.replace(settings, final_parents=top_k)
 
     with _index_lock:
         lexical = _current_lexical(backend)
@@ -1337,10 +1369,16 @@ def _hybrid_retrieve_response(
             record_cache[cid] = rec
             return rec
 
-        retriever = HybridRetriever(dense_search=dense_search, get_record=get_record, lexical=lexical)
+        scoped = bool(scope_ws or scope_docs)
+        retriever = HybridRetriever(
+            dense_search=dense_search,
+            get_record=get_record,
+            lexical=lexical,
+            # Spend the lexical budget on in-scope chunks only (and report in-scope counts).
+            lexical_filter=(lambda cid: get_record(cid) is not None) if scoped else None,
+        )
         results, trace = retriever.retrieve(question, settings=settings)
 
-    top_k = payload.top_k or _index_settings().top_k
     if top_k:
         results = results[:top_k]
     elapsed_ms = int((time.perf_counter() - started) * 1000)
@@ -1467,15 +1505,34 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
         if key not in _RESERVED_METADATA_KEYS:
             metadata.setdefault(key, value)
 
-    doc = Document(page_content=payload.text, metadata=metadata)
-    chunks = chunk_documents(
-        [doc],
-        chunk_size=chunk_settings.chunk_size,
-        chunk_overlap=chunk_settings.chunk_overlap,
-        separators=chunk_settings.separators,
-    )
+    # Posted text goes through the same native parser + structure/token-aware chunker as an
+    # uploaded file (one chunk owner): field blocks stay whole, every chunk is its own parent
+    # and carries the identity prefix, so a text document is retrievable passage by passage
+    # instead of collapsing into one anonymous fragment.
     embedder = _embedder_or_503(embed_settings)
     token_counter = embedder.token_counter()
+    title = str(metadata.get("title") or "")
+    parsed = parse_document(
+        DocumentSource(
+            document_id=payload.document_id,
+            filename=f"{payload.document_id}.txt",
+            mime_type="text/plain",
+            content=payload.text,
+            workspace_id=payload.workspace_id,
+            metadata={"title": title} if title else {},
+        )
+    )
+    chunks = _chunks_to_documents(
+        chunk_parsed_document(parsed, settings=structured_chunk_settings, token_counter=token_counter),
+        workspace_id=payload.workspace_id,
+        document_id=payload.document_id,
+        doc_id=doc_id,
+        kb_relpath=kb_relpath,
+        content_hash_value=ch,
+    )
+    for chunk in chunks:
+        for key, value in metadata.items():
+            chunk.metadata.setdefault(key, value)
     with _embed_lock:
         items: list[EmbeddedChunk] = list(embed_chunks(iter(chunks), settings=embed_settings, embedder=embedder))
 
@@ -1491,6 +1548,7 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
             structured_chunk_settings=structured_chunk_settings,
             embedder=embedder,
             token_counter=token_counter,
+            parsed=parsed,
         )
     except HTTPException:
         raise
@@ -1510,6 +1568,7 @@ def _publish_text_document(
     structured_chunk_settings: StructuredChunkSettings,
     embedder: Embedder,
     token_counter: TokenCounter,
+    parsed: ParsedDocument,
 ) -> dict[str, Any]:
     ch = content_hash_value
     with _index_lock, locked_index_instance(_index_instance_id_path(), create=False) as lease:
@@ -1591,9 +1650,10 @@ def _publish_text_document(
         )
         pipeline = {
             "ingest_mode": "text",
-            "chunker": "recursive-character",
-            "chunk_config_fingerprint": signature.text_chunk_config_fingerprint,
-            "parser": None,
+            "chunker": "structured-token",
+            "chunk_config_fingerprint": signature.file_chunk_config_fingerprint,
+            "parser": {"name": parsed.parser_name, "version": parsed.parser_version},
+            "source_type": parsed.source_type,
         }
         build_receipt = write_index_build_receipt(_index_build_receipt_path(), signature, document_pipeline=pipeline)
 
@@ -1890,9 +1950,9 @@ def document_chunks_endpoint(
             {
                 "chunk_id": sc.chunk_id,
                 "ordinal": ordinal,
-                "text": sc.text,
+                "text": md.get("display_text") or sc.text,  # what a reader sees, not the embedded prefix
                 "page": md.get("page"),
-                "section": md.get("section") or md.get("title"),
+                "section": md.get("section"),
                 "start_offset": md.get("start_offset"),
                 "end_offset": md.get("end_offset"),
                 # Richer inspection fields (already stored on chunk metadata) so ControlRoom's
@@ -1957,21 +2017,13 @@ def delete_document_endpoint(
 def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
     _require_workspace_scope(payload)
+    embed_settings = _embed_settings()
     try:
-        with _index_lock:
-            retrieval = retrieve(
-                payload.question,
-                index_path=_index_path(),
-                state_path=_state_path(),
-                embed_settings=_embed_settings(),
-                index_settings=_index_settings(),
-                top_k=payload.top_k,
-                workspace_id=payload.workspace_id,
-                document_ids=payload.document_ids,
-                backend=_current_backend(),
-            )
+        retrieval = _retrieval_for_answer(payload, embed_settings)
     except ScopeNotSupportedError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise _service_failure(exc) from exc
     # answer() may call out to an LLM; run it outside the index lock. The caller may only pick
@@ -1988,6 +2040,45 @@ def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(de
     return result.to_dict()
 
 
+def _retrieval_for_answer(payload: QuestionRequest, embed_settings: EmbedSettings) -> RetrievalResult:
+    """One retrieval owner for every public endpoint.
+
+    ``/api/ask`` and ``/api/eval/run`` use the same hybrid path (and the same citation labels)
+    as ``/api/retrieve`` on enumerable backends; only backends that cannot serve hybrid
+    retrieval fall back to the legacy dense-only path.
+    """
+    backend = _current_backend()
+    if not getattr(backend, "supports_inmemory_scope_filter", False):
+        with _index_lock:
+            return retrieve(
+                payload.question,
+                index_path=_index_path(),
+                state_path=_state_path(),
+                embed_settings=embed_settings,
+                index_settings=_index_settings(),
+                top_k=payload.top_k,
+                workspace_id=payload.workspace_id,
+                document_ids=payload.document_ids,
+                backend=backend,
+            )
+    hybrid = _hybrid_retrieve_response(payload, backend, embed_settings)
+    return RetrievalResult(
+        query=str(hybrid["query"]),
+        chunks=[
+            RetrievedChunk(
+                chunk_id=str(chunk["chunk_id"]),
+                score=float(chunk["score"]),
+                text=str(chunk["text"]),
+                metadata=dict(chunk["metadata"]),
+                citation=str(chunk["citation"]),
+            )
+            for chunk in hybrid["chunks"]
+        ],
+        embed=dict(hybrid["embed"]),
+        elapsed_ms=int(hybrid["elapsed_ms"]),
+    )
+
+
 @app.post("/api/eval/run")
 def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
@@ -1999,18 +2090,30 @@ def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(defau
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"code": "eval_dataset_malformed"}) from exc
     model: str = _resolve_answer_model(payload.model)
-    report = run_eval(
-        cases,
-        index_path=_index_path(),
-        state_path=_state_path(),
-        embed_settings=_embed_settings(),
-        index_settings=_index_settings(),
-        model=model,
-        top_k=payload.top_k or _index_settings().top_k,
-        timeout=_llm_timeout(),
-        max_tokens=_llm_max_tokens(),
-        max_context_chars=_max_context_chars(),
-    )
+    embed_settings = _embed_settings()
+    top_k = payload.top_k or _index_settings().top_k
+
+    def retriever(question: str) -> RetrievalResult:
+        return _retrieval_for_answer(QuestionRequest(question=question, top_k=top_k), embed_settings)
+
+    try:
+        report = run_eval(
+            cases,
+            index_path=_index_path(),
+            state_path=_state_path(),
+            embed_settings=embed_settings,
+            index_settings=_index_settings(),
+            model=model,
+            top_k=top_k,
+            timeout=_llm_timeout(),
+            max_tokens=_llm_max_tokens(),
+            max_context_chars=_max_context_chars(),
+            retriever=retriever,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _service_failure(exc) from exc
     return {"markdown": report.to_markdown(), "cases": report.cases}
 
 

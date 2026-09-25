@@ -45,6 +45,10 @@ class ChunkRecord:
     source_title: str = ""
     entry: str = ""  # the parent/page title, e.g. "Kimi K2.6"
     token_count: int = 0
+    # True when ``section`` locates the passage inside the document (a heading path, a page
+    # title of a paginated document, or a field label); False when it merely repeats the
+    # inferred title of an unpaginated text document.
+    section_is_locator: bool = True
 
 
 @dataclass(slots=True)
@@ -70,15 +74,27 @@ class HybridResult:
     final_rank: int | None = None
     parent_reason: str = ""
     sibling_expanded: bool = False
+    section_is_locator: bool = True
 
     def citation(self) -> str:
-        """Human-meaningful label, e.g. ``[LLM Architecture Gallery, p. 67, Key detail]``."""
-        parts = [self.source_title or self.entry or "document"]
+        """Human-meaningful label, e.g. ``[LLM Architecture Gallery, p. 67, Key detail]``.
+
+        The section is shown whenever it locates the passage inside the document and differs
+        from the document title, so two headings of one Markdown/DOCX document never share a
+        label; a plain text document whose section merely repeats its title gets no locator.
+        """
+        title = self.source_title or self.entry or "document"
+        parts = [title]
         if self.page_number is not None:
             parts.append(f"p. {self.page_number}")
-        if self.section and self.section != self.entry:
+        if self.section and self.section_is_locator and self.section != title:
             parts.append(self.section)
         return "[" + ", ".join(parts) + "]"
+
+
+def _fusion_order(result: HybridResult) -> tuple[float, int, str]:
+    dense = result.dense_rank if result.dense_rank is not None else 1_000_000
+    return (-result.fusion_score, dense, result.chunk_id)
 
 
 def reciprocal_rank_fusion(rankings: list[list[str]], *, k: int) -> dict[str, float]:
@@ -96,6 +112,10 @@ class HybridRetriever:
     get_record: Callable[[str], ChunkRecord | None]
     lexical: LexicalIndex | None = None
     reranker: Reranker | None = None
+    # Optional scope predicate for the lexical stage: applied before the candidate cut so the
+    # lexical budget is spent on in-scope chunks only (dense candidates are scope-filtered by
+    # ``dense_search`` itself).
+    lexical_filter: Callable[[str], bool] | None = None
 
     def retrieve(
         self, query: str, *, settings: RetrievalSettings
@@ -111,11 +131,12 @@ class HybridRetriever:
         lexical_used = bool(
             settings.enable_lexical and self.lexical is not None and len(self.lexical)
         )
-        lexical = (
-            self.lexical.search(nq, top_k=settings.lexical_candidates)
-            if lexical_used and self.lexical is not None
-            else []
-        )
+        lexical: list[tuple[str, float]] = []
+        if lexical_used and self.lexical is not None:
+            if self.lexical_filter is not None:
+                lexical = self.lexical.search(nq, top_k=settings.lexical_candidates, allow=self.lexical_filter)
+            else:
+                lexical = self.lexical.search(nq, top_k=settings.lexical_candidates)
         lexical_rank = {cid: i for i, (cid, _) in enumerate(lexical)}
         lexical_score = {cid: s for cid, s in lexical}
 
@@ -156,6 +177,7 @@ class HybridRetriever:
                     entry=rec.entry,
                     text=rec.text,
                     token_count=rec.token_count,
+                    section_is_locator=rec.section_is_locator,
                     dense_score=dense_score.get(cid, 0.0),
                     dense_rank=dense_rank.get(cid),
                     lexical_score=lexical_score.get(cid, 0.0),
@@ -179,7 +201,10 @@ class HybridRetriever:
                 else (-r.fusion_score, r.chunk_id)
             )
         else:
-            results.sort(key=lambda r: (-r.fusion_score, r.chunk_id))
+            # Equal fused scores (e.g. dense #1 + lexical #2 versus dense #2 + lexical #1) are
+            # broken by the dense rank: the embedding captures the question's intent, the
+            # lexical stage its surface terms. Chunk id keeps the order deterministic.
+            results.sort(key=_fusion_order)
 
         for i, r in enumerate(results):
             r.fusion_rank = i

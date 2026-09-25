@@ -116,8 +116,15 @@ class EmbeddingTokenCounter:
         text = text or ""
         encode = getattr(self._tok, "encode", None)
         if callable(encode):
+            # verbose=False: measuring a whole parent before splitting legitimately exceeds the
+            # model limit; the chunker enforces the cap, so the tokenizer's warning is noise.
             try:
-                return len(encode(text))
+                return len(encode(text, verbose=False))
+            except TypeError:
+                try:
+                    return len(encode(text))
+                except Exception:  # noqa: BLE001 — fall back to the call form below
+                    pass
             except Exception:  # noqa: BLE001 — fall back to the call form below
                 pass
         try:

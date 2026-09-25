@@ -40,7 +40,9 @@ class TextParser:
         elements, page_title, page_type = structure_block(
             text, id_prefix=f"{doc_id}#p1", page_number=1
         )
-        title = page_title or str(source.metadata.get("title") or "") or _stem(source.filename)
+        # The caller's title is the document's product identity; the inferred first line stays
+        # the page/entry title used for grouping.
+        title = str(source.metadata.get("title") or "") or page_title or _stem(source.filename)
         page = ParsedPage(
             page_number=1,
             elements=tuple(elements),

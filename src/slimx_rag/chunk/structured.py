@@ -48,8 +48,17 @@ class _Parent:
 
 
 def _iter_parents(doc: ParsedDocument) -> Iterator[_Parent]:
-    """Yield parent units: each page, subdivided at heading/title boundaries."""
+    """Yield parent units: each page, subdivided at heading/title boundaries.
+
+    A group made only of heading/title elements (a document title followed directly by its
+    first section heading) carries no content of its own: its text already lives in the
+    children's ``section_path`` and the document title. Emitting it as a chunk gave a
+    content-less passage that won exact-identifier boosts, so it is skipped whenever the
+    document has any body element. Group ordinals are preserved so sibling parent ids do not
+    shift.
+    """
     paginated = doc.page_count is not None
+    has_body = any(el.element_type not in _HEADING_TYPES for page in doc.pages for el in page.elements)
     for page in doc.pages:
         groups: list[list[ParsedElement]] = []
         current: list[ParsedElement] = []
@@ -61,6 +70,8 @@ def _iter_parents(doc: ParsedDocument) -> Iterator[_Parent]:
         if current:
             groups.append(current)
         for gi, group in enumerate(groups):
+            if has_body and all(e.element_type in _HEADING_TYPES for e in group):
+                continue
             head = next((e for e in group if e.element_type in _HEADING_TYPES), None)
             title = (head.text if head else None) or page.title or doc.title
             section = (head.text if head else None) or page.title
