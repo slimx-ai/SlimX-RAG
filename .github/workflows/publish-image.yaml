@@ -1,14 +1,109 @@
 name: Publish image
 
-# Build and push the SlimX-RAG service image to GitHub Container Registry. Downstream
-# apps (e.g. SlimX-AI ControlRoom) consume this published image — they do not build it.
+# Two publication paths, never mixed:
+#
+# * candidate-cpu (workflow_dispatch, default): builds ONLY the CPU Dockerfile from the exact
+#   dispatched commit, pushes ghcr.io/slimx-ai/slimx-rag:candidate-<sha> with SBOM + provenance
+#   attestations, never moves `latest`, never builds GPU, creates no release. The pushed
+#   registry digest (printed in the job summary and uploaded as an artifact) is the release
+#   identity a downstream app (ControlRoom) pins; the tag is a convenience.
+# * release (GitHub release published): the historical semver + `latest` CPU publication and
+#   the GPU variant. Unchanged in intent, but also pinned inputs and attestations.
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "candidate-cpu publishes one CPU candidate by digest; release replays the release path"
+        type: choice
+        options: [candidate-cpu, release]
+        default: candidate-cpu
+
+permissions:
+  contents: read
 
 jobs:
+  candidate-cpu:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate-cpu'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout the exact dispatched commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Read the package version
+        id: version
+        run: echo "version=$(python3 -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the CPU candidate (SBOM + provenance attached)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/slimx-ai/slimx-rag:candidate-${{ github.sha }}
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
+            VERSION=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Attest build provenance (GitHub attestation)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/slimx-ai/slimx-rag
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Record the registry identity
+        run: |
+          set -euo pipefail
+          mkdir -p candidate-identity
+          echo "ghcr.io/slimx-ai/slimx-rag@${{ steps.build.outputs.digest }}" > candidate-identity/image-digest.txt
+          echo "${{ github.sha }}" > candidate-identity/source-revision.txt
+          docker buildx imagetools inspect "ghcr.io/slimx-ai/slimx-rag@${{ steps.build.outputs.digest }}" --raw > candidate-identity/manifest.json
+          docker buildx imagetools inspect "ghcr.io/slimx-ai/slimx-rag@${{ steps.build.outputs.digest }}" > candidate-identity/imagetools-inspect.txt
+          {
+            echo "## SlimX-RAG CPU candidate"
+            echo
+            echo "- source revision: \`${{ github.sha }}\`"
+            echo "- image: \`ghcr.io/slimx-ai/slimx-rag@${{ steps.build.outputs.digest }}\`"
+            echo "- tag (convenience only): \`candidate-${{ github.sha }}\`"
+            echo "- version: ${{ steps.version.outputs.version }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the candidate identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: slimx-rag-candidate-${{ github.sha }}
+          path: candidate-identity/
+
   publish:
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'release')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -16,6 +111,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Read the package version
+        id: version
+        run: echo "version=$(python3 -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")" >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -41,13 +140,21 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
+            VERSION=${{ steps.version.outputs.version }}
+          sbom: true
+          provenance: mode=max
 
-  # GPU variant (Dockerfile.gpu, CUDA torch) published with -gpu-suffixed tags, e.g.
-  # ghcr.io/slimx-ai/slimx-rag:latest-gpu. Consumed by ControlRoom's `--profile rag-gpu`.
+  # GPU variant (Dockerfile.gpu, CUDA torch) published with -gpu-suffixed tags on releases only.
+  # It is unverified by the CPU qualification and is never triggered by the candidate path.
   publish-gpu:
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -84,6 +191,9 @@ jobs:
         with:
           context: .
           file: Dockerfile.gpu
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}

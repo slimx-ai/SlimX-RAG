@@ -304,6 +304,7 @@ def _embed_settings_from_state_with_overrides(
     max_chars: int | None,
     normalize_text: bool | None,
     device: str | None = None,
+    revision: str | None = None,
 ) -> EmbedSettings:
     """
     Query-time embedding settings:
@@ -326,6 +327,8 @@ def _embed_settings_from_state_with_overrides(
         kwargs["model"] = model
     if hf_model is not None:
         kwargs["hf_model"] = hf_model
+    if revision is not None:
+        kwargs["revision"] = revision
     if dim is not None:
         kwargs["dim"] = int(dim)
     if batch_size is not None:
@@ -407,6 +410,7 @@ def handle_index(args: argparse.Namespace) -> int:
         provider=args.embed_provider,
         model=args.embed_model,
         hf_model=args.hf_model,
+        revision=getattr(args, "hf_revision", None),
         dim=args.embed_dim,
         batch_size=args.embed_batch,
         max_chars=(None if args.embed_max_chars == 0 else int(args.embed_max_chars)),
@@ -457,6 +461,7 @@ def handle_run(args: argparse.Namespace) -> int:
         provider=args.embed_provider,
         model=args.embed_model,
         hf_model=args.hf_model,
+        revision=getattr(args, "hf_revision", None),
         dim=args.embed_dim,
         batch_size=args.embed_batch,
         max_chars=(None if args.embed_max_chars == 0 else int(args.embed_max_chars)),
@@ -578,6 +583,7 @@ def handle_query(args: argparse.Namespace) -> int:
         max_chars=args.embed_max_chars,
         normalize_text=args.embed_normalize,
         device=getattr(args, "embed_device", None),
+        revision=getattr(args, "hf_revision", None),
     )
 
     emb = make_embedder(embed_settings)
@@ -605,6 +611,7 @@ def _make_embed_settings_for_query(args: argparse.Namespace, idx_state_embed: di
         max_chars=args.embed_max_chars,
         normalize_text=args.embed_normalize,
         device=getattr(args, "embed_device", None),
+        revision=getattr(args, "hf_revision", None),
     )
 
 
@@ -738,6 +745,12 @@ def _add_embed_args_indexing(p: argparse.ArgumentParser) -> None:
     g.add_argument("--embed-provider", type=str, default=d.provider, choices=EMBED_PROVIDERS)
     g.add_argument("--embed-model", type=str, default=d.model, help="OpenAI embedding model")
     g.add_argument("--hf-model", type=str, default=d.hf_model, help="SentenceTransformers model id")
+    g.add_argument(
+        "--hf-revision",
+        type=str,
+        default=d.revision,
+        help="Exact Hugging Face model commit for --embed-provider hf (immutable model identity)",
+    )
     g.add_argument("--embed-dim", type=int, default=d.dim, help="Hash dim (and optional validation)")
     g.add_argument("--embed-batch", type=int, default=d.batch_size)
     g.add_argument("--embed-max-chars", type=int, default=(d.max_chars or 0), help="0 disables")
@@ -756,6 +769,7 @@ def _add_embed_overrides_query(p: argparse.ArgumentParser) -> None:
     g.add_argument("--embed-provider", type=str, default=None, choices=EMBED_PROVIDERS)
     g.add_argument("--embed-model", type=str, default=None)
     g.add_argument("--hf-model", type=str, default=None)
+    g.add_argument("--hf-revision", type=str, default=None)
     g.add_argument("--embed-dim", type=int, default=None)
     g.add_argument("--embed-batch", type=int, default=None)
     g.add_argument("--embed-max-chars", type=int, default=None, help="0 disables; if omitted uses state/defaults")
