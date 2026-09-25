@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ class GateResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "passed": self.passed,
-            "checks": [check.__dict__ for check in self.checks],
+            "checks": [asdict(check) for check in self.checks],
             "skipped": list(self.skipped),
         }
 
