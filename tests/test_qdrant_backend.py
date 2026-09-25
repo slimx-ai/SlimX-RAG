@@ -82,15 +82,17 @@ class FakeQdrantClient:
         for p in points_selector.points:
             store.pop(str(p), None)
 
-    def search(self, *, collection_name: str, query_vector: list[float], limit: int, with_payload: bool):
+    # qdrant-client removed ``QdrantClient.search`` in 1.15; the fake deliberately offers only the
+    # Universal Query API so a regression to ``search`` fails here instead of against a live server.
+    def query_points(self, *, collection_name: str, query: list[float], limit: int, with_payload: bool):
         store = self.points.get(collection_name, {})
         out = []
         for p in store.values():
-            score = sum(a * b for a, b in zip(query_vector, p.vector, strict=False))
+            score = sum(a * b for a, b in zip(query, p.vector, strict=False))
             out.append(types.SimpleNamespace(id=p.id, score=score, payload=p.payload))
         # Intentionally reverse tie order to prove backend code applies chunk_id ascending.
         out.sort(key=lambda p: (p.score, p.id), reverse=True)
-        return out[:limit]
+        return types.SimpleNamespace(points=out[:limit])
 
 
 def install_fake_qdrant(monkeypatch):
@@ -299,3 +301,23 @@ def test_qdrant_connection_failure_raises_friendly_error(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="Could not reach Qdrant"):
         idx.load()
+
+
+def test_qdrant_api_key_is_passed_as_a_string_or_omitted(monkeypatch, tmp_path):
+    install_fake_qdrant(monkeypatch)
+
+    from slimx_rag.index.qdrant_backend import QdrantIndexBackend
+
+    QdrantIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="qdrant", backend_config={"collection": "slimx"}),
+        state_path=tmp_path / "index_state.json",
+    )
+    assert FakeQdrantClient.instances[-1].api_key is None
+
+    QdrantIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="qdrant", backend_config={"collection": "slimx", "api" + "_key": "k"}),
+        state_path=tmp_path / "index_state.json",
+    )
+    assert FakeQdrantClient.instances[-1].api_key == "k"

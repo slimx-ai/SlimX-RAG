@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from uuid import UUID
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import IndexSettings
@@ -35,7 +36,9 @@ class QdrantIndexBackend(IndexBackend):
         if self.batch_size <= 0:
             raise ValueError("Qdrant backend_config['batch_size'] must be > 0")
         prefer_grpc = bool(cfg.get("prefer_grpc") or False)
-        self.client = QdrantClient(url=self.url, api_key=cfg.get("api" + "_key"), prefer_grpc=prefer_grpc)
+        raw_api_key = cfg.get("api" + "_key")
+        api_key = str(raw_api_key) if raw_api_key else None
+        self.client = QdrantClient(url=self.url, api_key=api_key, prefer_grpc=prefer_grpc)
         self.state = IndexState.load(self.state_path)
 
         # Transport-level errors worth translating into a friendly message.
@@ -127,7 +130,7 @@ class QdrantIndexBackend(IndexBackend):
             return 0
         with self._network():
             for start in range(0, len(ids), self.batch_size):
-                batch = ids[start : start + self.batch_size]
+                batch: list[int | str | UUID] = list(ids[start : start + self.batch_size])
                 self.client.delete(collection_name=self.collection, points_selector=self._qm.PointIdsList(points=batch))
         return len(ids)
 
@@ -167,15 +170,17 @@ class QdrantIndexBackend(IndexBackend):
             raise RuntimeError(f"Query vector dim {len(query_vector)} does not match index dim {self._dim}")
         k = int(top_k or self.settings.top_k)
         candidate_k = max(k, k * 4)
+        # Universal Query API (qdrant-client >= 1.10). The older ``QdrantClient.search`` was
+        # removed by the client in 1.15, so the locked client could not query at all.
         with self._network():
-            res = self.client.search(
+            response = self.client.query_points(
                 collection_name=self.collection,
-                query_vector=list(map(float, query_vector)),
+                query=list(map(float, query_vector)),
                 limit=candidate_k,
                 with_payload=True,
             )
         out: list[SearchResult] = []
-        for p in res:
+        for p in response.points:
             payload = p.payload or {}
             out.append(SearchResult(
                 chunk_id=str(p.id),

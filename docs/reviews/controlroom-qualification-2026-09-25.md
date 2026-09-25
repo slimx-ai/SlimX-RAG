@@ -44,7 +44,7 @@ belongs to Codex or a human and has not happened at the time of writing.
 | --- | --- | --- |
 | Critical | 0 | — |
 | High | 3 | 001, 002, 003 |
-| Medium | 11 | 004–014 |
+| Medium | 12 | 004–014, 038 |
 | Low | 15 | 015–029 |
 | Informational | 8 | 030–037 |
 
@@ -302,6 +302,17 @@ Later improvement.
 Reads serialize with each other and with writes (measured in §7). Acceptable at current scale.
 Later improvement.
 
+### RAG-AUD-038 — Medium — Qdrant backend calls a removed client method (CI-surfaced)
+`index/qdrant_backend.py:171` called `QdrantClient.search`, which qdrant-client removed in 1.15; with
+the locked client (1.19.1, the version the service image installs) every Qdrant query raised
+`AttributeError`, so the `qdrant` extra was non-functional. Not exercised by the qualification
+(ControlRoom uses the local JSONL backend; the unit-test fake still offered `search`). Surfaced on
+2026-09-25 by the new 3.12 CI leg that lock-verifies the service extra set and runs mypy against the
+real client types (three errors: `api_key` typed `object`, `PointIdsList(points=list[str])`, missing
+`search`). Disposition (applied in the same range): query through `query_points` (Universal Query
+API, qdrant-client >= 1.10; the extra floor is raised), typed client inputs, and a fake that offers
+only `query_points` so a regression to `search` fails in the unit tests. Merge blocker (corrected).
+
 ### Informational
 - **RAG-AUD-030** The exact-match boost (0.5 identity / 0.15 text) dominates RRF scores (~1/61); this is
   intended for identifiers and produced no pathological ranking in the benchmark.
@@ -413,6 +424,7 @@ improvement targets; thresholds are not lowered.
 | measured retrieval-quality improvements | text-chunk parent identity; in-scope lexical candidates; top_k-derived parent cap; heading-only parents; underscore identifiers; single retrieval owner; citation/title/chunk-listing hygiene | 001, 006, 007, 008, 011, 016, 019, 020, 021 |
 | build hardening | digest-pinned base, pinned uv/torch, committed lock, reviewed SlimX archive, pinned model revision + offline, labels, SBOM/provenance, CPU-only candidate publication | 002, 014 |
 | docs/evidence/version | changelog, contract docs, boundary statement for 013, version bump | 013, 024, 026–037 |
+| CI-surfaced correction (after the author-side review) | Qdrant Universal Query API, typed client inputs, `qdrant` extra floor >= 1.10 | 038 |
 
 Deferred with explicit owner acceptance required: 022, 023, 028, 029, and the storage-format change
 behind 013.

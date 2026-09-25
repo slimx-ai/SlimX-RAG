@@ -67,6 +67,10 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
   `uv lock --check` guards the image build and the candidate workflow; CI pins uv 0.9.18 and
   lock-verifies the service extra set on one leg; the GPU Dockerfile reinstalls CUDA torch and
   asserts it (still unverified, not part of the CPU qualification).
+- Qdrant backend: queries go through the Universal Query API (`query_points`).
+  `QdrantClient.search`, which qdrant-client removed in 1.15, left the locked client (1.19.1)
+  unable to query at all; the `qdrant` extra now requires qdrant-client >= 1.10. Surfaced by the
+  new CI leg that lock-verifies the service image's extra set (RAG-AUD-038).
 
 ### Added
 

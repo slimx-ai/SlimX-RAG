@@ -3958,7 +3958,7 @@ requires-dist = [
     { name = "pypdf", marker = "extra == 'doc'", specifier = ">=5.0" },
     { name = "python-docx", marker = "extra == 'doc'", specifier = ">=1.1" },
     { name = "python-multipart", marker = "extra == 'demo'", specifier = ">=0.0.9" },
-    { name = "qdrant-client", marker = "extra == 'qdrant'", specifier = ">=1.7.0" },
+    { name = "qdrant-client", marker = "extra == 'qdrant'", specifier = ">=1.10.0" },
     { name = "sentence-transformers", marker = "extra == 'hf'", specifier = ">=3.0,<4" },
     { name = "slimx", marker = "extra == 'answer'", url = "https://github.com/slimx-ai/slimx/archive/e4b7ca30f9b528df477672cfa5911c69b722a556.tar.gz" },
     { name = "tqdm", specifier = ">=4.66" },
