@@ -425,6 +425,56 @@ improvement targets; thresholds are not lowered.
 | build hardening | digest-pinned base, pinned uv/torch, committed lock, reviewed SlimX archive, pinned model revision + offline, labels, SBOM/provenance, CPU-only candidate publication | 002, 014 |
 | docs/evidence/version | changelog, contract docs, boundary statement for 013, version bump | 013, 024, 026–037 |
 | CI-surfaced correction (after the author-side review) | Qdrant Universal Query API, typed client inputs, `qdrant` extra floor >= 1.10 | 038 |
+| quality-correction pass (owner decision, after the first hard stop) | field-addressed heading-less fact sheets, duplicate-passage guard, `index-shaping-v3` | §10 |
 
 Deferred with explicit owner acceptance required: 022, 023, 028, 029, and the storage-format change
 behind 013.
+
+## 10. Quality-correction pass (owner decision, 2026-09-25 evening)
+
+At the first hard stop the owner declined to accept the frozen gate's two failing checks with the
+retained embedder and directed one bounded correction pass: same model, reranking off, thresholds
+and gold untouched (a gold case may change only with evidence and owner approval).
+
+Diagnosis (executed against the real service, hf provider; evidence root
+`04-rag-corrections/quality-correction-pass/`): the failing question "When was the Atlas gantry
+last serviced?" targets the plain-text maintenance log, a heading-less fact sheet (title line plus
+`LAST SERVICE` / `TECHNICIAN` / `NOTES` fields) stored as one packed 49-token chunk. BM25 ranked
+that chunk first, but dense retrieval left it outside the top-30 candidates (dense rank 41 of 78 in
+scope): cosine 0.478 against the packed chunk versus 0.616 against the title plus the `LAST
+SERVICE` line alone, because one mean-pooled vector over three unrelated fields answers a question
+about any one of them poorly. With one list missing, reciprocal-rank fusion gave the chunk 1/61 and
+it fell to rank 19. The remaining top-1 misses were near ties (file-014: RRF 0.1825 vs 0.1823;
+conf-036: the calibration procedure's section is literally titled "Gearbox mounting torque"). The
+gold case is valid and unambiguous; it was not changed.
+
+Correction (`chunk/structured.py`, `retrieval/hybrid.py`, `server/app.py`; `index-shaping-v3`):
+a heading-less fact sheet with at least two labelled fields is addressed by its fields (one
+retrieval unit per field, embedded as the identity prefix plus that field alone; every unit
+displays the whole sheet and is cited by its field label), and the grouping stage never shows the
+same passage twice (`dropped_duplicate_text`). Fact sheets under a heading are unchanged, so no
+Markdown/DOCX/PDF section locator moves. Indexes shaped by v1 or v2 rebuild.
+
+Measurement (frozen gate, identical corpus, gold and thresholds; before = `bf306d5e`):
+
+| Metric (hf, all-MiniLM-L6-v2, CPU, top_k 8) | before | after |
+| --- | --- | --- |
+| hit@1 / hit@3 / hit@5 | 0.921 / 0.952 / 0.968 | 0.936 / 0.984 / 1.000 |
+| MRR / nDCG@8 | 0.937 / 0.937 | 0.954 / 0.958 |
+| exact-identifier hit@1 | 1.000 | 1.000 |
+| top-1 expected source (46 tagged) | 0.913 | 0.935 |
+| expected locator ok / failures | 1.000 / 0 | 1.000 / 0 |
+| `updated_doc_missing_new_content` | 2 | 0 |
+| leaks / stale deleted / fidelity errors / unstable | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| latency median / p95 | 11.7 / 12.3 ms | 11.7 / 12.5 ms |
+| frozen gate | FAIL (2 of 26) | PASS (26 of 26) |
+| hash provider (deterministic) | hit@1 0.635, PASS | hit@1 0.651, PASS |
+
+Only three cases changed rank: upd-043a (absent → 4), upd-043b (absent → 3) and file-014 (2 → 1).
+The file-014 change is a tie-break outcome (both boosted candidates now share one fused score and
+the dense-first tie-break selects the code file), reported as such rather than as a designed gain.
+upd-043a/b are now found but still rank behind the two incident summaries the embedding model
+prefers for "Atlas gantry"; the top-1 threshold is met with one case of margin (43 of 46).
+conf-036 remains the single documented top-1 miss. Not done on purpose: no threshold, gold,
+embedder, reranker, identity-prefix or fusion-constant change.
+

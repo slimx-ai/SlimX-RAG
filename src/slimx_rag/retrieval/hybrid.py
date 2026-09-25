@@ -8,7 +8,8 @@ Stages (each value is recorded for inspection, never collapsed into one opaque s
 4. reciprocal-rank fusion of the dense and lexical rankings (rank-based, not score-added)
 5. exact title/entity boost + intent-aware timeline demotion
 6. parent grouping + diversity (strongest child per parent first; a sibling only for a
-   materially different field; cap per parent; preserve distinct parents)
+   materially different field that shows a different passage; cap per parent; preserve
+   distinct parents)
 
 Reranking is an optional hook (off by default). The result carries dense/lexical/exact/
 fusion/rerank/final ranks and the parent-selection reason so Developer Mode can explain
@@ -52,6 +53,9 @@ class ChunkRecord:
     # Ancestor headings; identifiers that occur only in a heading-only parent are matched
     # exactly through these (they are also embedded in the identity prefix).
     section_path: tuple[str, ...] = ()
+    # The passage shown to the caller when it differs from the embedded text (a field-addressed
+    # fact sheet embeds one field but displays the whole sheet).
+    display_text: str = ""
 
 
 @dataclass(slots=True)
@@ -78,6 +82,11 @@ class HybridResult:
     parent_reason: str = ""
     sibling_expanded: bool = False
     section_is_locator: bool = True
+    display_text: str = ""
+
+    def passage(self) -> str:
+        """The text the caller sees for this result."""
+        return self.display_text or self.text
 
     def citation(self) -> str:
         """Human-meaningful label, e.g. ``[LLM Architecture Gallery, p. 67, Key detail]``.
@@ -182,6 +191,7 @@ class HybridRetriever:
                     text=rec.text,
                     token_count=rec.token_count,
                     section_is_locator=rec.section_is_locator,
+                    display_text=rec.display_text,
                     dense_score=dense_score.get(cid, 0.0),
                     dense_rank=dense_rank.get(cid),
                     lexical_score=lexical_score.get(cid, 0.0),
@@ -233,6 +243,7 @@ def _group_by_parent(
 ) -> list[HybridResult]:
     """Strongest child per parent first; then sibling expansion for new fields, capped."""
     per_parent: dict[str, list[str | None]] = {}
+    passages: dict[str, set[str]] = {}
     distinct: list[str] = []
     selected: list[HybridResult] = []
 
@@ -243,11 +254,13 @@ def _group_by_parent(
         if len(distinct) >= settings.final_parents:
             continue
         per_parent[r.parent_id] = [r.section]
+        passages[r.parent_id] = {r.passage()}
         distinct.append(r.parent_id)
         r.parent_reason = "primary"
         selected.append(r)
 
-    # Pass 2: a second child of an already-selected parent only if it adds a new field.
+    # Pass 2: a second child of an already-selected parent only if it adds a new field AND a
+    # new passage (the field units of one fact sheet all display the same sheet: never twice).
     for r in ordered:
         if r in selected or r.parent_id not in per_parent:
             continue
@@ -258,7 +271,11 @@ def _group_by_parent(
         if r.section in chosen:
             r.parent_reason = "dropped_duplicate_section"
             continue
+        if r.passage() in passages[r.parent_id]:
+            r.parent_reason = "dropped_duplicate_text"
+            continue
         chosen.append(r.section)
+        passages[r.parent_id].add(r.passage())
         r.parent_reason = "sibling_expansion"
         r.sibling_expanded = True
         selected.append(r)

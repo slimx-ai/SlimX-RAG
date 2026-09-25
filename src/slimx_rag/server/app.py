@@ -367,6 +367,7 @@ def _to_chunk_record(result: SearchResult) -> ChunkRecord:
         # A heading path, a page of a paginated document or a field label locates the passage;
         # the inferred first line of an unpaginated text document does not.
         section_is_locator=bool(md.get("section_path")) or page_number is not None or (section != entry),
+        display_text=str(md.get("display_text") or ""),
         section_path=(
             tuple(str(part) for part in raw_path)
             if isinstance(raw_path := md.get("section_path"), (list, tuple))

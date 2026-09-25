@@ -3,7 +3,7 @@
 ## 0.3.0 — 2026-09-25 (ControlRoom qualification candidate; no GitHub release yet)
 
 Audit record: `docs/reviews/controlroom-qualification-2026-09-25.md`. Indexes shaped by earlier
-releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v2`).
+releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v3`).
 
 ### Changed (retrieval contract)
 
@@ -44,6 +44,20 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
 - `DELETE /api/documents/{id}` and document replacement sweep every stored chunk tagged with the
   document's `doc_id` in addition to the bookkept ids (`swept_chunks` reported), so a lost
   state commit can never leave deleted or superseded content retrievable.
+
+### Field-addressed fact sheets (2026-09-25, same release; `index-shaping-v3`)
+
+- A heading-less fact sheet (a title line plus labelled fields and no heading of its own, e.g. a
+  maintenance record posted as text) is addressed by its fields: one retrieval unit per field,
+  embedded as the identity prefix plus that field alone, while every unit displays the whole sheet
+  and is cited by its field label (`[Atlas Maintenance Log, LAST SERVICE]`). One mean-pooled vector
+  over several unrelated fields answered a question about one of them poorly (ControlRoom
+  qualification: cosine 0.48 packed vs 0.62 for the matching field; the record fell outside the
+  dense top-30 while BM25 ranked it first). Fact sheets under a heading are unchanged. The grouping
+  stage never shows the same passage twice (`parent_reason: dropped_duplicate_text`). Frozen
+  ControlRoom gate with the retained model: FAIL (2 of 26) → PASS (26 of 26); hit@1 0.921 → 0.936,
+  hit@5 0.968 → 1.000, MRR 0.937 → 0.954, top-1 expected source 0.913 → 0.935. Indexes shaped by
+  v1 or v2 report `index_signature_mismatch` and are rebuilt.
 
 ### Author-side review corrections (2026-09-25, same release)
 

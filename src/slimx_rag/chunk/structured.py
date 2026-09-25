@@ -3,7 +3,12 @@
 Replaces blind character windows with structure-aware chunks:
 
 - Parents are PDF pages (or sections, split at heading/title boundaries). A small,
-  coherent fact-sheet page stays a single self-contained chunk.
+  coherent fact sheet under a heading stays a single self-contained chunk.
+- A heading-less fact sheet (a title line plus labelled fields and no heading of its own) is
+  addressed by its fields: one retrieval unit per field, embedded as the identity prefix
+  plus that field alone, because one mean-pooled vector over several unrelated fields answers
+  a question about any one of them poorly. Every unit displays the whole sheet and is cited
+  by its field label, the only locator such a sheet has.
 - Children are created only when a parent exceeds the embedding-safe token cap, by
   packing WHOLE elements (a field's label+value is never split; tables stay isolated).
 - Normal chunks use no sliding overlap; a small token overlap is used ONLY when an
@@ -107,6 +112,22 @@ def _identity_prefix(
     if ancestors:
         lines.append("Path: " + " > ".join(ancestors))
     return "\n".join(lines)
+
+
+def _is_field_addressed(parent: _Parent) -> bool:
+    """True for a heading-less fact sheet with at least two labelled fields.
+
+    Its field labels are the only locators it has, and a single embedding of the packed sheet
+    is diluted by the fields unrelated to a question about one of them (measured: the
+    ControlRoom qualification's maintenance-log question scored 0.48 against the packed sheet
+    and 0.62 against its matching field alone).
+    """
+    if parent.page_type != PageType.FACT_SHEET:
+        return False
+    if any(el.element_type in _HEADING_TYPES for el in parent.elements):
+        return False
+    labelled = [el for el in parent.elements if el.element_type == ElementType.FIELD and el.metadata.get("label")]
+    return len(labelled) >= 2
 
 
 def _child_section(parent: _Parent, els: list[ParsedElement]) -> str | None:
@@ -224,14 +245,15 @@ def _chunk_parent(
     chunks: list[RetrievalChunk] = []
     ordinal = 0
 
-    def emit(display_text: str, els: list[ParsedElement], *, forced: bool) -> None:
+    def emit(display_text: str, els: list[ParsedElement], *, forced: bool, embedding_body: str | None = None) -> None:
         nonlocal ordinal
         display_text = display_text.strip()
         if not display_text:
             return
         section = _child_section(parent, els)
         prefix = prefix_for(section)
-        embedding_text = f"{prefix}\n\n{display_text}" if prefix else display_text
+        body = display_text if embedding_body is None else embedding_body.strip()
+        embedding_text = f"{prefix}\n\n{body}" if prefix else body
         chunk_id = make_chunk_id(
             parent_id=parent.parent_id,
             content_hash_value=content_hash(embedding_text),
@@ -268,9 +290,21 @@ def _chunk_parent(
     if not parent_text:
         return chunks
 
-    # Whole parent fits the embedding-safe budget -> one self-contained chunk.
+    # Whole parent fits the embedding-safe budget -> one self-contained chunk, unless it is a
+    # heading-less fact sheet, which is addressed by its fields (one unit per field, each
+    # displaying the whole sheet; the remaining non-title elements form one more unit).
     if counter.count(parent_text) <= whole_parent_budget:
-        emit(parent_text, list(parent.elements), forced=False)
+        if _is_field_addressed(parent):
+            rest: list[ParsedElement] = []
+            for el in parent.elements:
+                if el.element_type == ElementType.FIELD and el.metadata.get("label"):
+                    emit(parent_text, [el], forced=False, embedding_body=el.text)
+                elif el.text.strip() != parent.title:
+                    rest.append(el)
+            if rest:
+                emit(parent_text, rest, forced=False, embedding_body="\n".join(e.text for e in rest))
+        else:
+            emit(parent_text, list(parent.elements), forced=False)
         return chunks
 
     # Otherwise pack WHOLE elements (no overlap), isolating tables and force-splitting any
