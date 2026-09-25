@@ -246,11 +246,11 @@ class HuggingFaceEmbedder(Embedder):
                 "HuggingFaceEmbedder requires optional dependency 'sentence-transformers'. "
                 "Install extras (e.g. `uv sync --extra hf`)."
             ) from e
-        kwargs: dict[str, object] = {}
-        if revision:
-            kwargs["revision"] = revision
         # device=None lets SentenceTransformers auto-select (CUDA if available, else CPU).
-        self._model = SentenceTransformer(model, device=device, **kwargs)
+        if revision:
+            self._model = SentenceTransformer(model, device=device, revision=revision)
+        else:
+            self._model = SentenceTransformer(model, device=device)
         self._normalize = normalize_embeddings
         self._query_prefix = query_prefix
         self._document_prefix = document_prefix

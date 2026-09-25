@@ -194,8 +194,14 @@ _CODE_EXTS = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".c", 
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
+_HTML_MIMES = {"text/html", "application/xhtml+xml"}
+# Text sources are decoded as UTF-8; a NUL byte or more than this share of undecodable bytes
+# means the payload is binary (image, spreadsheet, archive, ...), not text.
+_MAX_UNDECODABLE_RATIO = 0.02
+
+
 def detect_source_type(filename: str, mime_type: str | None) -> str:
-    """Return one of: pdf | docx | markdown | code | text."""
+    """Return one of: pdf | docx | markdown | code | html | text."""
     lower = (filename or "").lower()
     if lower.endswith(".pdf") or mime_type == "application/pdf":
         return "pdf"
@@ -203,6 +209,22 @@ def detect_source_type(filename: str, mime_type: str | None) -> str:
         return "docx"
     if lower.endswith((".md", ".markdown")) or mime_type == "text/markdown":
         return "markdown"
+    if lower.endswith((".html", ".htm", ".xhtml")) or (mime_type or "").split(";")[0].strip() in _HTML_MIMES:
+        return "html"
     if any(lower.endswith(ext) for ext in _CODE_EXTS):
         return "code"
     return "text"
+
+
+def looks_binary(content: bytes | str | None, *, sample_bytes: int = 65536) -> bool:
+    """True when byte content cannot be text: contains NUL or too many undecodable bytes."""
+    if not isinstance(content, bytes):
+        return False
+    sample = content[:sample_bytes]
+    if not sample:
+        return False
+    if b"\x00" in sample:
+        return True
+    decoded = sample.decode("utf-8", errors="replace")
+    bad = decoded.count("\ufffd")
+    return bad > 0 and (bad / max(1, len(decoded))) > _MAX_UNDECODABLE_RATIO

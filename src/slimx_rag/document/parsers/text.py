@@ -7,7 +7,7 @@ keeps its ``LABEL: value`` blocks coherent, while ordinary prose becomes paragra
 from __future__ import annotations
 
 from ..model import DocumentSource, ParsedDocument, ParsedPage
-from ..structure import structure_block
+from ..structure import detect_source_type, looks_binary, structure_block
 
 PARSER_NAME = "native-text"
 PARSER_VERSION = "1"
@@ -27,7 +27,12 @@ class TextParser:
     version = PARSER_VERSION
 
     def supports(self, source: DocumentSource) -> bool:
-        return True  # catch-all; registered last
+        # Catch-all for genuine text only: markup the service has no parser for (HTML) and
+        # binary payloads (images, spreadsheets, archives) must fail closed as unsupported so a
+        # host can fall back to its own extraction instead of indexing garbage as text.
+        if detect_source_type(source.filename, source.mime_type) == "html":
+            return False
+        return not looks_binary(source.content)
 
     def parse(self, source: DocumentSource) -> ParsedDocument:
         text = _as_text(source)

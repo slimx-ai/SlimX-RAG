@@ -128,6 +128,12 @@ class FaissIndexBackend(IndexBackend):
         self._index = self._faiss.IndexIDMap2(base)
         self._dim = dim
 
+    def iter_chunks(self) -> Iterable[tuple[str, str, dict[str, object]]]:
+        # The payload sidecar holds text + metadata for every stored vector, so authoritative
+        # per-document deletion (sweep by metadata doc_id) works here too.
+        for cid, (text, metadata) in list(self._payload.items()):
+            yield cid, text, metadata
+
     def delete(self, chunk_ids: Iterable[str]) -> int:
         if self._index is None:
             return 0

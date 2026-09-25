@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from ..model import DocumentSource, ElementType, PageType, ParsedDocument, ParsedElement, ParsedPage
-from ..structure import detect_source_type
+from ..structure import detect_source_type, looks_binary
 
 PARSER_NAME = "native-markdown"
 PARSER_VERSION = "1"
@@ -29,7 +29,7 @@ class MarkdownParser:
     version = PARSER_VERSION
 
     def supports(self, source: DocumentSource) -> bool:
-        return detect_source_type(source.filename, source.mime_type) == "markdown"
+        return detect_source_type(source.filename, source.mime_type) == "markdown" and not looks_binary(source.content)
 
     def parse(self, source: DocumentSource) -> ParsedDocument:
         text = _as_text(source)

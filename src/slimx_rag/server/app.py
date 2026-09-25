@@ -12,19 +12,20 @@ from typing import Any, Literal
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from langchain_core.documents import Document
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from slimx_rag.answer import answer
 from slimx_rag.chunk import TokenCounter, chunk_documents, chunk_parsed_document
 from slimx_rag.core.hashing import content_hash, path_id
-from slimx_rag.document import DocumentError, DocumentSource, parse_document
-from slimx_rag.embed import EmbeddedChunk, embed_chunks, get_cached_embedder, make_token_counter
+from slimx_rag.document import DocumentError, DocumentSource, ParsedDocument, parse_document
+from slimx_rag.embed import EmbeddedChunk, Embedder, embed_chunks, get_cached_embedder, make_token_counter
 from slimx_rag.eval import load_eval_cases, run_eval
 from slimx_rag.index import (
     INDEX_BUILD_RECEIPT_FILENAME,
     INDEX_INSTANCE_ID_FILENAME,
     INDEX_SCHEMA_VERSION,
     IndexBackend,
+    IndexBuildReceipt,
     IndexInstanceLease,
     IndexSignature,
     IndexState,
@@ -455,14 +456,73 @@ def _check_index_reset_token(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Missing or invalid service token")
 
 
+MAX_QUESTION_CHARS = int(os.getenv("RAG_MAX_QUESTION_CHARS", "20000"))
+MAX_TOP_K = int(os.getenv("RAG_MAX_TOP_K", "200"))
+MAX_SCOPE_DOCUMENT_IDS = int(os.getenv("RAG_MAX_SCOPE_DOCUMENT_IDS", "10000"))
+MAX_IDENTIFIER_CHARS = 512
+
+
+def _identifier_problem(value: object) -> str | None:
+    """Why ``value`` is not an acceptable workspace/document identifier (None when it is)."""
+    if not isinstance(value, str):
+        return "must be a string"
+    if not value.strip():
+        return "must not be empty"
+    if len(value) > MAX_IDENTIFIER_CHARS:
+        return f"must be at most {MAX_IDENTIFIER_CHARS} characters"
+    if "/" in value:
+        # doc_id derives from "{workspace_id}/{document_id}"; a slash makes two different
+        # (workspace, document) pairs collide on one identity and breaks the path endpoints.
+        return "must not contain '/'"
+    if any(ord(ch) < 32 or ch == "\x7f" for ch in value):
+        return "must not contain control characters"
+    return None
+
+
+def _validate_identifier(field: str, value: object) -> str:
+    problem = _identifier_problem(value)
+    if problem is not None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_identifier", "field": field, "message": f"{field} {problem}"},
+        )
+    assert isinstance(value, str)
+    return value
+
+
 class QuestionRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
     model: str | None = None
-    top_k: int | None = Field(default=None, gt=0)
-    # Optional retrieval scope. When set, only chunks whose metadata matches are
-    # returned (chunks are tagged with workspace_id/document_id at ingest time).
-    workspace_id: str | None = None
-    document_ids: list[str] | None = None
+    top_k: int | None = Field(default=None, gt=0, le=MAX_TOP_K)
+    # Optional retrieval scope. When set, only chunks whose metadata matches are returned
+    # (chunks are tagged with workspace_id/document_id at ingest time). An empty string or an
+    # empty list is rejected rather than silently widening the scope; ``document_ids`` narrows a
+    # workspace and never replaces it (see RAG_REQUIRE_WORKSPACE_SCOPE).
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=MAX_IDENTIFIER_CHARS)
+    document_ids: list[str] | None = Field(default=None, min_length=1, max_length=MAX_SCOPE_DOCUMENT_IDS)
+
+    @field_validator("question")
+    @classmethod
+    def _question_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("question must not be blank")
+        return value
+
+    @field_validator("workspace_id")
+    @classmethod
+    def _workspace_id_valid(cls, value: str | None) -> str | None:
+        if value is not None and (problem := _identifier_problem(value)) is not None:
+            raise ValueError(f"workspace_id {problem}")
+        return value
+
+    @field_validator("document_ids")
+    @classmethod
+    def _document_ids_valid(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None:
+            for item in value:
+                if (problem := _identifier_problem(item)) is not None:
+                    raise ValueError(f"document_ids entries {problem}")
+        return value
 
 
 class EvalRequest(BaseModel):
@@ -472,10 +532,120 @@ class EvalRequest(BaseModel):
 
 
 class IndexRequest(BaseModel):
-    workspace_id: str
-    document_id: str
+    workspace_id: str = Field(min_length=1, max_length=MAX_IDENTIFIER_CHARS)
+    document_id: str = Field(min_length=1, max_length=MAX_IDENTIFIER_CHARS)
     text: str
     metadata: dict[str, Any] | None = None
+
+    @field_validator("workspace_id", "document_id")
+    @classmethod
+    def _identifiers_valid(cls, value: str, info: Any) -> str:
+        if (problem := _identifier_problem(value)) is not None:
+            raise ValueError(f"{info.field_name} {problem}")
+        return value
+
+
+# Caller metadata on /api/index may add descriptive keys but never the identity, locator or
+# ranking fields the service derives itself (a caller could otherwise forge citations).
+_RESERVED_METADATA_KEYS = frozenset(
+    {
+        "doc_id",
+        "kb_relpath",
+        "content_hash",
+        "workspace_id",
+        "document_id",
+        "chunk_id",
+        "chunk_index",
+        "parent_id",
+        "page",
+        "section",
+        "section_path",
+        "page_type",
+        "entry",
+        "source_title",
+        "display_text",
+        "token_count",
+        "ordinal",
+        "element_types",
+        "forced_split",
+    }
+)
+
+
+def _require_workspace_scope(payload: QuestionRequest) -> None:
+    """With RAG_REQUIRE_WORKSPACE_SCOPE set, retrieval without a workspace fails closed."""
+    if payload.workspace_id is None and os.getenv("RAG_REQUIRE_WORKSPACE_SCOPE", "").lower() in ("1", "true", "yes"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "workspace_scope_required",
+                "owner_action": "Send workspace_id (and document_ids to narrow it); unscoped retrieval is disabled.",
+            },
+        )
+
+
+def _service_failure(exc: Exception) -> HTTPException:
+    """Map a known corpus/embedder failure to the structured reason /ready would report."""
+    message = str(exc)
+    if isinstance(exc, HTTPException):
+        return exc
+    if "Corrupt index state" in message:
+        code, status = "index_state_invalid", 503
+    elif "index build receipt" in message.lower():
+        code, status = "index_build_receipt_invalid", 409
+    elif "dim" in message.lower() and "mismatch" in message.lower() or "mixed vector dimensions" in message:
+        code, status = "embedding_dim_mismatch", 503
+    elif isinstance(exc, TimeoutError):
+        code, status = "index_instance_id_unavailable", 503
+    else:
+        code, status = "backend_load_failed", 503
+    return HTTPException(
+        status_code=status,
+        detail={
+            "code": code,
+            "retryable": False,
+            "error_type": type(exc).__name__,
+            "owner_action": "Check GET /ready; repair or reset the index before retrying.",
+        },
+    )
+
+
+def _embedder_or_503(embed_settings: EmbedSettings) -> Embedder:
+    try:
+        return get_cached_embedder(embed_settings)
+    except Exception as exc:  # noqa: BLE001 — surfaced as the readiness reason, never a bare 500
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "embedder_init_failed",
+                "retryable": False,
+                "error_type": type(exc).__name__,
+                "owner_action": "Check GET /ready and the embedding configuration (model, device).",
+            },
+        ) from exc
+
+
+def _resolve_answer_model(requested: str | None) -> str:
+    """The LLM used by /api/ask and /api/eval/run: caller override only when explicitly allowed."""
+    configured = os.getenv("SLIMX_LLM_MODEL") or "fake:grounded"
+    if requested and os.getenv("RAG_ALLOW_MODEL_OVERRIDE", "").lower() in ("1", "true", "yes"):
+        return requested
+    return configured
+
+
+def _resolve_eval_dataset(dataset: str) -> Path:
+    """Only datasets inside RAG_EVAL_DATASET_DIR (default ./examples) may be read by the service."""
+    base = Path(os.getenv("RAG_EVAL_DATASET_DIR", "examples")).resolve()
+    candidate = Path(dataset).resolve()
+    if not candidate.is_relative_to(base):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "eval_dataset_outside_allowed_dir",
+                "owner_action": "Place the dataset under RAG_EVAL_DATASET_DIR or change that setting.",
+            },
+        )
+    return candidate
 
 
 class EmbeddingConfigRequest(BaseModel):
@@ -1135,7 +1305,7 @@ def _hybrid_retrieve_response(
         return True
 
     # Embed the query once, OFF the index lock (and off any per-request model rebuild).
-    embedder = get_cached_embedder(embed_settings)
+    embedder = _embedder_or_503(embed_settings)
     with _embed_lock:
         qvec = [float(x) for x in embedder.embed_query(question)]
 
@@ -1224,7 +1394,17 @@ def _hybrid_retrieve_response(
 @app.post("/api/retrieve")
 def retrieve_endpoint(payload: QuestionRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
+    _require_workspace_scope(payload)
     embed_settings = _embed_settings()
+    try:
+        return _retrieve_response(payload, embed_settings)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — known corpus/embedder failures become structured reasons
+        raise _service_failure(exc) from exc
+
+
+def _retrieve_response(payload: QuestionRequest, embed_settings: EmbedSettings) -> dict[str, Any]:
     backend = _current_backend()
     # Hybrid retrieval needs to enumerate the corpus (BM25) and read chunk metadata, which
     # only the in-memory local backend supports. Remote/ANN backends use the legacy dense
@@ -1282,9 +1462,9 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
         "workspace_id": payload.workspace_id,
         "document_id": payload.document_id,
     }
-    # Carry through caller metadata without overriding identity fields.
+    # Carry through descriptive caller metadata only; identity/locator keys are service-derived.
     for key, value in (payload.metadata or {}).items():
-        if key not in ("doc_id", "kb_relpath", "content_hash"):
+        if key not in _RESERVED_METADATA_KEYS:
             metadata.setdefault(key, value)
 
     doc = Document(page_content=payload.text, metadata=metadata)
@@ -1294,11 +1474,44 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
         chunk_overlap=chunk_settings.chunk_overlap,
         separators=chunk_settings.separators,
     )
-    embedder = get_cached_embedder(embed_settings)
+    embedder = _embedder_or_503(embed_settings)
     token_counter = embedder.token_counter()
     with _embed_lock:
         items: list[EmbeddedChunk] = list(embed_chunks(iter(chunks), settings=embed_settings, embedder=embedder))
 
+    try:
+        return _publish_text_document(
+            doc_id=doc_id,
+            content_hash_value=ch,
+            items=items,
+            expected_instance_id=expected_instance_id,
+            embed_settings=embed_settings,
+            index_settings=index_settings,
+            chunk_settings=chunk_settings,
+            structured_chunk_settings=structured_chunk_settings,
+            embedder=embedder,
+            token_counter=token_counter,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _service_failure(exc) from exc
+
+
+def _publish_text_document(
+    *,
+    doc_id: str,
+    content_hash_value: str,
+    items: list[EmbeddedChunk],
+    expected_instance_id: str | None,
+    embed_settings: EmbedSettings,
+    index_settings: IndexSettings,
+    chunk_settings: ChunkSettings,
+    structured_chunk_settings: StructuredChunkSettings,
+    embedder: Embedder,
+    token_counter: TokenCounter,
+) -> dict[str, Any]:
+    ch = content_hash_value
     with _index_lock, locked_index_instance(_index_instance_id_path(), create=False) as lease:
         if lease.instance_id != expected_instance_id:
             raise HTTPException(
@@ -1357,7 +1570,7 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
         ):
             raise HTTPException(status_code=409, detail="index_signature_mismatch_reindex_required")
 
-        idx.delete_doc(doc_id)  # replace this document's chunks; no-op when new
+        idx.delete_doc(doc_id)  # replace this document's chunks (bookkept + swept); no-op when new
         upserted = idx.upsert(items, skip_existing=False)
         idx.set_embed_config(embed_settings, dimension=actual_dimension)
         idx.save()
@@ -1420,6 +1633,8 @@ def index_file_endpoint(
     (embedding holds the separate ``_embed_lock``). Errors are redacted (no document text).
     """
     _check_token(authorization)
+    workspace_id = _validate_identifier("workspace_id", workspace_id)
+    document_id = _validate_identifier("document_id", document_id)
     # Snapshot generation/settings before parsing and embedding outside the mutation lock.
     with locked_index_instance(_index_instance_id_path(), create=False) as snapshot_lease:
         expected_instance_id = snapshot_lease.instance_id
@@ -1457,7 +1672,8 @@ def index_file_endpoint(
         raise HTTPException(status_code=413, detail=f"document has {parsed.element_count} elements; max {MAX_ELEMENTS}")
 
     t1 = time.perf_counter()
-    token_counter = make_token_counter(embed_settings)
+    embedder = _embedder_or_503(embed_settings)
+    token_counter = make_token_counter(embed_settings)  # the same cached embedder's tokenizer
     chunks = chunk_parsed_document(parsed, settings=structured_chunk_settings, token_counter=token_counter)
     timings["chunk_ms"] = int((time.perf_counter() - t1) * 1000)
 
@@ -1473,13 +1689,80 @@ def index_file_endpoint(
         content_hash_value=ch_hash,
     )
 
-    embedder = get_cached_embedder(embed_settings)
     t2 = time.perf_counter()
     with _embed_lock:  # embedding off the index lock
         items: list[EmbeddedChunk] = list(embed_chunks(iter(docs), settings=embed_settings, embedder=embedder))
     timings["embed_ms"] = int((time.perf_counter() - t2) * 1000)
 
     t3 = time.perf_counter()
+    try:
+        publish = _publish_file_document(
+            doc_id=doc_id,
+            content_hash_value=ch_hash,
+            items=items,
+            expected_instance_id=expected_instance_id,
+            embed_settings=embed_settings,
+            index_settings=index_settings,
+            text_chunk_settings=text_chunk_settings,
+            structured_chunk_settings=structured_chunk_settings,
+            embedder=embedder,
+            token_counter=token_counter,
+            parsed=parsed,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _service_failure(exc) from exc
+    upserted, total, lexical_capable, signature, pipeline, build_receipt = publish
+    timings["index_ms"] = int((time.perf_counter() - t3) * 1000)
+
+    model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
+    index_signature = signature.to_dict()
+    parent_count = len({str(d.metadata["parent_id"]) for d in docs})
+    return {
+        "status": "ready",
+        "document_id": document_id,
+        "doc_id": doc_id,
+        "rag_index_ref": f"slimx-rag:{doc_id}",
+        "parser": parsed.parser_name,
+        "parser_version": parsed.parser_version,
+        "source_type": parsed.source_type,
+        "page_count": parsed.page_count,
+        "element_count": parsed.element_count,
+        "parent_count": parent_count,
+        "chunk_count": len(items),
+        "upserted": upserted,
+        "total": total,
+        "embedding_provider": embed_settings.provider,
+        "embedding_model": model,
+        "embedding_dim": embedder.dim,
+        "embedding_max_seq_len": embedder.max_seq_length,
+        "vector_backend": index_settings.backend,
+        "lexical_retrieval": lexical_capable,
+        "warnings": list(parsed.warnings),
+        "timings_ms": timings,
+        "index_signature": index_signature,
+        "index_signature_source": "persisted_build",
+        "index_build_receipt": build_receipt.to_dict(),
+        "document_pipeline": pipeline,
+    }
+
+
+def _publish_file_document(
+    *,
+    doc_id: str,
+    content_hash_value: str,
+    items: list[EmbeddedChunk],
+    expected_instance_id: str | None,
+    embed_settings: EmbedSettings,
+    index_settings: IndexSettings,
+    text_chunk_settings: ChunkSettings,
+    structured_chunk_settings: StructuredChunkSettings,
+    embedder: Embedder,
+    token_counter: TokenCounter,
+    parsed: ParsedDocument,
+) -> tuple[int, int, bool, IndexSignature, dict[str, Any], IndexBuildReceipt]:
+    ch_hash = content_hash_value
     with _index_lock, locked_index_instance(_index_instance_id_path(), create=False) as lease:
         if lease.instance_id != expected_instance_id:
             raise HTTPException(
@@ -1571,38 +1854,7 @@ def index_file_endpoint(
             "source_type": parsed.source_type,
         }
         build_receipt = write_index_build_receipt(_index_build_receipt_path(), signature, document_pipeline=pipeline)
-    timings["index_ms"] = int((time.perf_counter() - t3) * 1000)
-
-    model = embed_settings.hf_model if embed_settings.provider == "hf" else embed_settings.model
-    index_signature = signature.to_dict()
-    parent_count = len({str(d.metadata["parent_id"]) for d in docs})
-    return {
-        "status": "ready",
-        "document_id": document_id,
-        "doc_id": doc_id,
-        "rag_index_ref": f"slimx-rag:{doc_id}",
-        "parser": parsed.parser_name,
-        "parser_version": parsed.parser_version,
-        "source_type": parsed.source_type,
-        "page_count": parsed.page_count,
-        "element_count": parsed.element_count,
-        "parent_count": parent_count,
-        "chunk_count": len(items),
-        "upserted": upserted,
-        "total": total,
-        "embedding_provider": embed_settings.provider,
-        "embedding_model": model,
-        "embedding_dim": embedder.dim,
-        "embedding_max_seq_len": embedder.max_seq_length,
-        "vector_backend": index_settings.backend,
-        "lexical_retrieval": lexical_capable,
-        "warnings": list(parsed.warnings),
-        "timings_ms": timings,
-        "index_signature": index_signature,
-        "index_signature_source": "persisted_build",
-        "index_build_receipt": build_receipt.to_dict(),
-        "document_pipeline": pipeline,
-    }
+    return upserted, total, lexical_capable, signature, pipeline, build_receipt
 
 
 @app.get("/api/documents/{document_id}/chunks")
@@ -1620,12 +1872,17 @@ def document_chunks_endpoint(
     empty list (chunk_count 0) rather than a 404 — chunk listing is a best-effort view.
     """
     _check_token(authorization)
+    workspace_id = _validate_identifier("workspace_id", workspace_id)
+    document_id = _validate_identifier("document_id", document_id)
     doc_id = path_id(f"{workspace_id}/{document_id}")
-    with _index_lock:
-        backend = _current_backend()
-        entry = backend.state.docs.get(doc_id) or {}
-        chunk_ids = [str(c) for c in (entry.get("chunk_ids") or [])]
-        stored = backend.get_chunks(chunk_ids)
+    try:
+        with _index_lock:
+            backend = _current_backend()
+            entry = backend.state.docs.get(doc_id) or {}
+            chunk_ids = [str(c) for c in (entry.get("chunk_ids") or [])]
+            stored = backend.get_chunks(chunk_ids)
+    except Exception as exc:  # noqa: BLE001
+        raise _service_failure(exc) from exc
     chunks: list[dict[str, Any]] = []
     for ordinal, sc in enumerate(stored):
         md = sc.metadata or {}
@@ -1670,19 +1927,28 @@ def delete_document_endpoint(
     after the backend save, the same crash-safety ordering as ``/api/index``.
     """
     _check_token(authorization)
+    workspace_id = _validate_identifier("workspace_id", workspace_id)
+    document_id = _validate_identifier("document_id", document_id)
     doc_id = path_id(f"{workspace_id}/{document_id}")
-    with _index_lock:
-        idx = _current_backend()
-        deleted = idx.delete_doc(doc_id)  # drop this document's vectors; no-op when unknown
-        idx.save()
-        _mark_index_written()  # our own write must not trigger a reload on the next read
-        idx.forget_doc_state(doc_id)  # forget the doc -> chunk_ids bookkeeping (state last)
-        total = len(idx)
+    try:
+        with _index_lock:
+            idx = _current_backend()
+            # Bookkept chunk ids plus an authoritative sweep of stray chunks tagged with this
+            # doc_id (a lost state commit must never leave deleted content retrievable).
+            bookkept, swept = idx.delete_doc_detailed(doc_id)
+            if bookkept or swept:
+                idx.save()
+                _mark_index_written()  # our own write must not trigger a reload on the next read
+            idx.forget_doc_state(doc_id)  # forget the doc -> chunk_ids bookkeeping (state last)
+            total = len(idx)
+    except Exception as exc:  # noqa: BLE001
+        raise _service_failure(exc) from exc
     return {
         "status": "deleted",
         "document_id": document_id,
         "doc_id": doc_id,
-        "deleted_chunks": deleted,
+        "deleted_chunks": bookkept + swept,
+        "swept_chunks": swept,
         "total": total,
     }
 
@@ -1690,6 +1956,7 @@ def delete_document_endpoint(
 @app.post("/api/ask")
 def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
+    _require_workspace_scope(payload)
     try:
         with _index_lock:
             retrieval = retrieve(
@@ -1705,8 +1972,11 @@ def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(de
             )
     except ScopeNotSupportedError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    # answer() may call out to an LLM; run it outside the index lock.
-    model: str = payload.model or os.getenv("SLIMX_LLM_MODEL") or "fake:grounded"
+    except Exception as exc:  # noqa: BLE001
+        raise _service_failure(exc) from exc
+    # answer() may call out to an LLM; run it outside the index lock. The caller may only pick
+    # the model when RAG_ALLOW_MODEL_OVERRIDE is set (provider egress with server credentials).
+    model: str = _resolve_answer_model(payload.model)
     result = answer(
         payload.question,
         retrieval,
@@ -1721,8 +1991,14 @@ def ask_endpoint(payload: QuestionRequest, authorization: str | None = Header(de
 @app.post("/api/eval/run")
 def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
-    cases = load_eval_cases(Path(payload.dataset))
-    model: str = payload.model or os.getenv("SLIMX_LLM_MODEL") or "fake:grounded"
+    dataset = _resolve_eval_dataset(payload.dataset)
+    try:
+        cases = load_eval_cases(dataset)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail={"code": "eval_dataset_not_found"}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "eval_dataset_malformed"}) from exc
+    model: str = _resolve_answer_model(payload.model)
     report = run_eval(
         cases,
         index_path=_index_path(),

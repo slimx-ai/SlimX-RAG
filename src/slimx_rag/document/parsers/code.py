@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 
 from ..model import DocumentSource, ElementType, PageType, ParsedDocument, ParsedElement, ParsedPage
+from ..structure import looks_binary
 
 PARSER_NAME = "native-code"
 PARSER_VERSION = "1"
@@ -58,7 +59,7 @@ class CodeParser:
 
     def supports(self, source: DocumentSource) -> bool:
         lower = (source.filename or "").lower()
-        return lower.endswith(_CODE_EXTS)
+        return lower.endswith(_CODE_EXTS) and not looks_binary(source.content)
 
     def parse(self, source: DocumentSource) -> ParsedDocument:
         text = _as_text(source)
