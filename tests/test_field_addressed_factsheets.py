@@ -71,20 +71,35 @@ def test_headingless_factsheet_is_addressed_by_field_and_shows_the_whole_sheet(m
 
 
 def test_factsheet_under_a_heading_stays_one_chunk_cited_by_its_heading() -> None:
-    src = DocumentSource(
-        document_id="cat",
-        filename="catalog.md",
-        mime_type="text/markdown",
-        content=(
-            b"# Parts Catalog\n\n## GX-210 servo gearbox\nPart number: GX-210\nRatio: 25:1\n"
-            b"Backlash: 3 arcmin\nMounting torque: 45 N-m\n"
-        ),
-    )
-    chunks = chunk_parsed_document(parse_document(src), token_counter=HeuristicTokenCounter(max_tokens=1000))
-    entry = [c for c in chunks if c.section == "GX-210 servo gearbox"]
+    # A bare label followed by a blank line is a HEADING (structure_block); the group under it is
+    # a fact sheet WITH a heading, so it stays one chunk cited by that heading, never by a label.
+    text = "Parts\n\nGX-210 SERVO GEARBOX\n\nPART NUMBER\ngx-210 series\nRATIO\n25:1 nominal\nBACKLASH\n3 arcmin\n"
+    src = DocumentSource(document_id="cat", filename="catalog.txt", mime_type="text/plain", content=text.encode())
+    doc = parse_document(src)
+    assert doc.pages[0].page_type == PageType.FACT_SHEET
+    chunks = chunk_parsed_document(doc, token_counter=HeuristicTokenCounter(max_tokens=1000))
+    entry = [c for c in chunks if c.section == "GX-210 SERVO GEARBOX"]
     assert len(entry) == 1
-    assert "Ratio: 25:1" in entry[0].display_text and "45 N-m" in entry[0].display_text
-    assert not any(c.section in {"Part number", "Ratio", "Backlash", "Mounting torque"} for c in chunks)
+    assert "25:1 nominal" in entry[0].display_text and "3 arcmin" in entry[0].display_text
+    assert not any(c.section in {"PART NUMBER", "RATIO", "BACKLASH"} for c in chunks)
+    assert not any(c.metadata.get("field_addressed") for c in chunks)
+
+
+def test_field_units_never_exceed_the_token_cap() -> None:
+    from slimx_rag.settings import StructuredChunkSettings
+
+    # A long label makes the per-unit prefix longer than the parent-section prefix; the sheet
+    # fits the whole-parent budget but not the budget that reserves the longest label prefix, so
+    # it must fall back to the packing path instead of emitting an over-cap unit.
+    words = " ".join(f"w{i}" for i in range(44))
+    text = f"Atlas\nID: 1\nXY: 2\nCONFIG AND DEPLOY NOTES FOR ALL: {words}\n"
+    src = DocumentSource(document_id="cap", filename="cap.txt", mime_type="text/plain", content=text.encode())
+    counter = HeuristicTokenCounter(max_tokens=64)
+    settings = StructuredChunkSettings(target_tokens=64, max_tokens=64, force_split_overlap_tokens=4)
+    chunks = chunk_parsed_document(parse_document(src), settings=settings, token_counter=counter)
+    assert chunks
+    assert max(c.token_count for c in chunks) <= 64
+    assert all(c.token_count == counter.count(c.embedding_text) for c in chunks)
 
 
 def test_field_units_of_one_sheet_never_show_the_same_passage_twice() -> None:
@@ -179,3 +194,34 @@ def test_posted_text_factsheet_is_listed_per_field_and_retrieved_once(client: Te
         "[Atlas Maintenance Log, TECHNICIAN]",
     }
     assert data["chunks"][0]["metadata"]["parent_reason"] == "primary"
+
+
+def test_caller_title_that_differs_from_the_first_line_still_yields_one_parent(client: TestClient) -> None:
+    # ControlRoom posts the upload filename as the title, so the sheet's own first line is not
+    # the caller's title; it must still be recognised as the title line (no content-free unit)
+    # and every unit, including a remaining-elements unit, must share one retrieval parent.
+    sheet = _SHEET + "\nSee the planner for the next slot.\n"
+    res = client.post(
+        "/api/index",
+        json={
+            "workspace_id": "ws",
+            "document_id": "log2",
+            "text": sheet,
+            "metadata": {"title": "atlas-maintenance-log.txt"},
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["chunk_count"] == 4  # three fields + the trailing sentence; no title-only unit
+
+    listed = client.get("/api/documents/log2/chunks", params={"workspace_id": "ws"}).json()["chunks"]
+    assert [c["section"] for c in listed] == ["LAST SERVICE", "TECHNICIAN", "NOTES", "atlas-maintenance-log.txt"]
+    assert len({c["text"] for c in listed}) == 1
+
+    for question in ("LAST SERVICE planner next slot", "Atlas Maintenance Log", "TECHNICIAN NOTES"):
+        data = client.post(
+            "/api/retrieve",
+            json={"question": question, "workspace_id": "ws", "document_ids": ["log2"], "top_k": 8},
+        ).json()
+        assert len(data["chunks"]) == 1, question  # one passage, one parent, whatever units matched
+        assert data["chunks"][0]["text"].startswith("Atlas Maintenance Log")
+        assert data["trace"]["final_parents"] == 1

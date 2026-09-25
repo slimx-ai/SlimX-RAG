@@ -349,10 +349,16 @@ def _to_chunk_record(result: SearchResult) -> ChunkRecord:
     entry = str(md.get("entry") or "")
     parent_id = str(md.get("parent_id") or md.get("parent_doc_id") or md.get("doc_id") or result.chunk_id)
     ordinal = md.get("ordinal")
-    if (section is None or section == entry) and isinstance(ordinal, int) and not isinstance(ordinal, bool):
+    if (
+        not md.get("field_addressed")
+        and (section is None or section == entry)
+        and isinstance(ordinal, int)
+        and not isinstance(ordinal, bool)
+    ):
         # Parent grouping collapses field views of one entity (a fact sheet's fields), never
         # consecutive prose passages of one page/section: each narrative child is its own
-        # parent, so a long unstructured document can contribute several passages.
+        # parent, so a long unstructured document can contribute several passages. The units of
+        # a field-addressed sheet (including its remaining-elements unit) keep one parent.
         parent_id = f"{parent_id}#o{ordinal}"
     return ChunkRecord(
         chunk_id=result.chunk_id,
@@ -415,6 +421,7 @@ def _chunks_to_documents(
                     "ordinal": ch.ordinal,
                     "element_types": [t.value for t in ch.element_types],
                     "forced_split": ch.forced_split,
+                    "field_addressed": bool(ch.metadata.get("field_addressed", False)),
                 },
             )
         )
@@ -627,6 +634,7 @@ _RESERVED_METADATA_KEYS = frozenset(
         "ordinal",
         "element_types",
         "forced_split",
+        "field_addressed",
     }
 )
 

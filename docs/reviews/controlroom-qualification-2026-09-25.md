@@ -448,12 +448,27 @@ it fell to rank 19. The remaining top-1 misses were near ties (file-014: RRF 0.1
 conf-036: the calibration procedure's section is literally titled "Gearbox mounting torque"). The
 gold case is valid and unambiguous; it was not changed.
 
-Correction (`chunk/structured.py`, `retrieval/hybrid.py`, `server/app.py`; `index-shaping-v3`):
-a heading-less fact sheet with at least two labelled fields is addressed by its fields (one
-retrieval unit per field, embedded as the identity prefix plus that field alone; every unit
-displays the whole sheet and is cited by its field label), and the grouping stage never shows the
-same passage twice (`dropped_duplicate_text`). Fact sheets under a heading are unchanged, so no
-Markdown/DOCX/PDF section locator moves. Indexes shaped by v1 or v2 rebuild.
+Correction (`chunk/structured.py`, `retrieval/hybrid.py`, `server/app.py`, `document/model.py`
+and the text/PDF parsers; `index-shaping-v3`): a heading-less fact sheet with at least two labelled
+fields that fits the budget with its longest label prefix is addressed by its fields (one retrieval
+unit per field, embedded as the identity prefix plus that field alone, plus one unit for the
+remaining elements minus the sheet's own title line, recognised from the page text rather than the
+caller's title); every unit displays the whole sheet, shares one retrieval parent and is cited by
+its field label, and the hybrid grouping stage never shows the same passage twice
+(`dropped_duplicate_text`). Fact sheets under a heading, Markdown and DOCX sections and every
+heading-based locator are unchanged; a heading-less PDF fact page is now cited by page and matched
+label (`[gallery, p. 2, KEY DETAIL]`) instead of page and page title, which the gate's page-only
+PDF locator check cannot see and which the chunker tests pin. Remote backends (dense-only, no
+grouping) return the units individually as stored. Indexes shaped by v1 or v2 rebuild.
+
+Narrow same-model sanity review of the first version of this correction (`b5447ef8`) found and
+the follow-up commit fixed: (High) a caller title that differs from the sheet's first line, which
+is ControlRoom's convention (upload filename), produced a title-only unit under a second retrieval
+parent so the same sheet could be shown twice; (Medium) a field unit could exceed the token cap
+because the branch was gated on the shorter parent-section prefix; (Medium) the heading test was
+vacuous (Markdown never yields fields); documentation over-claimed "no PDF locator moves"; the
+ablation tool built records without `display_text`; the chunk-listing contract change was
+undocumented.
 
 Measurement (frozen gate, identical corpus, gold and thresholds; before = `bf306d5e`):
 

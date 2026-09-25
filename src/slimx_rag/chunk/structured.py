@@ -4,11 +4,13 @@ Replaces blind character windows with structure-aware chunks:
 
 - Parents are PDF pages (or sections, split at heading/title boundaries). A small,
   coherent fact sheet under a heading stays a single self-contained chunk.
-- A heading-less fact sheet (a title line plus labelled fields and no heading of its own) is
-  addressed by its fields: one retrieval unit per field, embedded as the identity prefix
-  plus that field alone, because one mean-pooled vector over several unrelated fields answers
-  a question about any one of them poorly. Every unit displays the whole sheet and is cited
-  by its field label, the only locator such a sheet has.
+- A heading-less fact sheet (a title line plus at least two labelled fields and no heading of
+  its own) that fits the budget with its longest label prefix is addressed by its fields: one
+  retrieval unit per field, embedded as the identity prefix plus that field alone, because one
+  mean-pooled vector over several unrelated fields answers a question about any one of them
+  poorly. The remaining elements (minus the sheet's own title line) form one more unit. Every
+  unit displays the whole sheet, shares one retrieval parent and is cited by its field label,
+  the only locator such a sheet has (a heading-less PDF fact page is cited by page and label).
 - Children are created only when a parent exceeds the embedding-safe token cap, by
   packing WHOLE elements (a field's label+value is never split; tables stay isolated).
 - Normal chunks use no sliding overlap; a small token overlap is used ONLY when an
@@ -50,6 +52,7 @@ class _Parent:
     page_number: int | None
     page_type: PageType
     elements: tuple[ParsedElement, ...]
+    inferred_title: str | None = None
 
 
 def _iter_parents(doc: ParsedDocument) -> Iterator[_Parent]:
@@ -88,6 +91,7 @@ def _iter_parents(doc: ParsedDocument) -> Iterator[_Parent]:
                 page_number=page.page_number if paginated else None,
                 page_type=page.page_type,
                 elements=tuple(group),
+                inferred_title=page.inferred_title,
             )
 
 
@@ -244,6 +248,7 @@ def _chunk_parent(
 
     chunks: list[RetrievalChunk] = []
     ordinal = 0
+    field_addressed = False  # set before the field units of a heading-less fact sheet are emitted
 
     def emit(display_text: str, els: list[ParsedElement], *, forced: bool, embedding_body: str | None = None) -> None:
         nonlocal ordinal
@@ -281,6 +286,8 @@ def _chunk_parent(
                     "parser_version": doc.parser_version,
                     "entry": parent.title,
                     "page_type": parent.page_type.value,
+                    # Every unit of a field-addressed sheet shares one retrieval parent.
+                    "field_addressed": field_addressed,
                 },
             )
         )
@@ -291,15 +298,19 @@ def _chunk_parent(
         return chunks
 
     # Whole parent fits the embedding-safe budget -> one self-contained chunk, unless it is a
-    # heading-less fact sheet, which is addressed by its fields (one unit per field, each
-    # displaying the whole sheet; the remaining non-title elements form one more unit).
-    if counter.count(parent_text) <= whole_parent_budget:
-        if _is_field_addressed(parent):
+    # heading-less fact sheet that also fits with its LONGEST label prefix (every unit is cited
+    # by a label): then one unit per field, each displaying the whole sheet, plus one unit for
+    # the remaining elements minus the sheet's own title line.
+    parent_tokens = counter.count(parent_text)
+    if parent_tokens <= whole_parent_budget:
+        if _is_field_addressed(parent) and parent_tokens <= content_budget:
+            field_addressed = True
+            title_lines = {t for t in (parent.inferred_title, parent.title) if t}
             rest: list[ParsedElement] = []
             for el in parent.elements:
                 if el.element_type == ElementType.FIELD and el.metadata.get("label"):
                     emit(parent_text, [el], forced=False, embedding_body=el.text)
-                elif el.text.strip() != parent.title:
+                elif el.text.strip() not in title_lines:
                     rest.append(el)
             if rest:
                 emit(parent_text, rest, forced=False, embedding_body="\n".join(e.text for e in rest))

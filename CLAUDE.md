@@ -17,7 +17,7 @@ CLI error contract: user-input errors (bad paths, malformed JSONL, bad `--backen
 
 Optional extras enable specific providers/backends: `uv sync --extra openai|hf|doc|demo|faiss|qdrant|pgvector`.
 
-Tests do not require installation — `tests/conftest.py` adds `src/` to `sys.path`. Backend tests (qdrant, pgvector, faiss) use fake client classes injected via `sys.modules`/monkeypatch, so no servers or optional deps are needed to run the full suite. CI runs pytest + build on Python 3.11–3.13.
+Tests do not require installation — `tests/conftest.py` adds `src/` to `sys.path`. Backend tests (qdrant, pgvector, faiss) use fake client classes injected via `sys.modules`/monkeypatch, so no servers or optional deps are needed to run the full suite. CI runs pytest + build on Python 3.10–3.13.
 
 CI's 3.12 leg installs every service-image extra from the lock (`uv sync --locked --group dev --extra demo --extra hf --extra doc --extra answer --extra openai --extra qdrant`) and runs mypy against the real optional-dependency types; it is a permanent gate, not qualification machinery. A local `mypy` run is only meaningful with the same extras installed (RAG-AUD-038 was missed because qdrant-client was absent).
 

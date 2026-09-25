@@ -141,6 +141,7 @@ class PdfParser:
                     title=page_title,
                     page_type=page_type,
                     text=cleaned,
+                    inferred_title=page_title,
                 )
             )
 

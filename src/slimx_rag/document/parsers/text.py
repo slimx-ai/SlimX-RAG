@@ -49,6 +49,7 @@ class TextParser:
             title=title,
             page_type=page_type,
             text=text,
+            inferred_title=page_title,
         )
         return ParsedDocument(
             document_id=doc_id,

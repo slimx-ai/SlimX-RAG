@@ -47,17 +47,26 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
 
 ### Field-addressed fact sheets (2026-09-25, same release; `index-shaping-v3`)
 
-- A heading-less fact sheet (a title line plus labelled fields and no heading of its own, e.g. a
-  maintenance record posted as text) is addressed by its fields: one retrieval unit per field,
-  embedded as the identity prefix plus that field alone, while every unit displays the whole sheet
-  and is cited by its field label (`[Atlas Maintenance Log, LAST SERVICE]`). One mean-pooled vector
-  over several unrelated fields answered a question about one of them poorly (ControlRoom
-  qualification: cosine 0.48 packed vs 0.62 for the matching field; the record fell outside the
-  dense top-30 while BM25 ranked it first). Fact sheets under a heading are unchanged. The grouping
-  stage never shows the same passage twice (`parent_reason: dropped_duplicate_text`). Frozen
-  ControlRoom gate with the retained model: FAIL (2 of 26) → PASS (26 of 26); hit@1 0.921 → 0.936,
-  hit@5 0.968 → 1.000, MRR 0.937 → 0.954, top-1 expected source 0.913 → 0.935. Indexes shaped by
-  v1 or v2 report `index_signature_mismatch` and are rebuilt.
+- A heading-less fact sheet (a title line plus at least two labelled fields and no heading of its
+  own, e.g. a maintenance record posted as text) that fits the token budget with its longest label
+  prefix is addressed by its fields: one retrieval unit per field, embedded as the identity prefix
+  plus that field alone, plus one unit for the remaining elements minus the sheet's own title line
+  (recognised from the text itself, so a caller title such as the upload filename does not create
+  a title-only unit). Every unit displays the whole sheet, shares one retrieval parent and is cited
+  by its field label (`[Atlas Maintenance Log, LAST SERVICE]`; a heading-less PDF fact page is now
+  cited by page and label, `[gallery, p. 2, KEY DETAIL]`, instead of page and page title). One
+  mean-pooled vector over several unrelated fields answered a question about one of them poorly
+  (ControlRoom qualification: cosine 0.48 packed vs 0.62 for the matching field; the record fell
+  outside the dense top-30 while BM25 ranked it first). Fact sheets under a heading, Markdown and
+  DOCX sections and every heading-based locator are unchanged; a sheet that does not fit the budget
+  keeps the packing path. On the hybrid path (local backend) parent grouping never shows the same
+  passage twice (`parent_reason: dropped_duplicate_text`); FAISS/Qdrant/pgvector run dense-only
+  without grouping and return the units individually as stored. `GET /api/documents/{id}/chunks`
+  lists one entry per unit (each showing the whole sheet, differing by `section`) and
+  `chunk_count` counts units. Frozen ControlRoom gate with the retained model: FAIL (2 of 26) →
+  PASS (26 of 26); hit@1 0.921 → 0.936, hit@5 0.968 → 1.000, MRR 0.937 → 0.954, top-1 expected
+  source 0.913 → 0.935. Indexes shaped by v1 or v2 report `index_signature_mismatch` and are
+  rebuilt.
 
 ### Author-side review corrections (2026-09-25, same release)
 

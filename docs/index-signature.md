@@ -132,9 +132,10 @@ Successful indexing responses also include `document_pipeline`:
 The receipt identifies which chunk fingerprint applies to that document. `index_shaping_version`
 is `index-shaping-v3` from 0.3.0: posted text is parsed and chunked by the structured pipeline
 (every chunk carries parent identity, `page_type`, `section` and `display_text` and embeds the
-identity prefix), heading-only parents emit no chunk, and a heading-less fact sheet is addressed
-by its fields (one unit per labelled field, each displaying the whole sheet and cited by its
-label), so indexes shaped by v1 or v2 report `index_signature_mismatch` and must be rebuilt.
+identity prefix), heading-only parents emit no chunk, and a heading-less fact sheet that fits the
+budget is addressed by its fields (one unit per labelled field plus one for the remaining
+elements, each displaying the whole sheet, sharing one parent and cited by its label), so indexes
+shaped by v1 or v2 report `index_signature_mismatch` and must be rebuilt.
 
 ## Reset behavior
 

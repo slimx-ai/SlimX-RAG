@@ -96,6 +96,10 @@ class ParsedPage:
     page_type: PageType = PageType.UNKNOWN
     text: str = ""  # normalized page text
     metadata: dict[str, Any] = field(default_factory=dict)
+    # The first-line title ``structure_block`` inferred from the page text itself. ``title`` may
+    # instead be the caller's document title (text sources), so the chunker uses this one to
+    # recognise the page's own title line.
+    inferred_title: str | None = None
 
     @property
     def is_empty(self) -> bool:

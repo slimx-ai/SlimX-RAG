@@ -46,8 +46,9 @@ BACKEND_NAMESPACE_VERSION = "backend-namespace-v1"
 # index-shaping-v2 (0.3.0): posted text is parsed and chunked by the structured pipeline (every
 # chunk carries parent identity, page_type, section and display_text and embeds the identity
 # prefix); heading-only parents emit no chunk. index-shaping-v3 (0.3.0, same release): a
-# heading-less fact sheet is addressed by its fields (one unit per labelled field, each
-# displaying the whole sheet and cited by its label). Indexes shaped by v1 or v2 must be rebuilt.
+# heading-less fact sheet that fits the budget is addressed by its fields (one unit per labelled
+# field plus one for the remaining elements, each displaying the whole sheet, sharing one parent
+# and cited by its label). Indexes shaped by v1 or v2 must be rebuilt.
 INDEX_SHAPING_VERSION = "index-shaping-v3"
 ENGINE_NAME = "slimx-rag"
 INDEX_INSTANCE_ID_FILENAME = "index_instance_id"
