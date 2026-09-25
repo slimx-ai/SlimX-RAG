@@ -369,12 +369,12 @@ Later improvement.
 | 100 | 794 | 7.2 MB | 187 ms | 49 ms | 8 ms | 164 ms |
 | 500 | 3 994 | 36.6 MB | 818 ms | 221 ms | 20 ms | 805 ms |
 | 1 000 | 7 975 | 73.2 MB | 1 643 ms | 552 ms | 38 ms | 1 613 ms |
+| 2 000 | 16 081 | 147.6 MB | 2 409 ms | 747 ms | 211 ms | 2 967 ms |
 
 Every mutation rewrites the whole JSONL file and the first read after a write rebuilds the BM25
-sidecar, both linear in corpus size; warm retrieval stays fast. Concurrency: 8 threads × 40 mixed
-index/retrieve/delete operations completed with 320 × HTTP 200 and a consistent index/state
-afterwards. A 2 000-document step of the same run is appended to the evidence root when it
-completes (`01-audit/concurrency_scale.out`).
+sidecar, both linear in corpus size; warm retrieval stays fast up to ~10k chunks and reaches
+~0.2 s at 16k. Concurrency: 8 threads × 40 mixed index/retrieve/delete operations completed with
+320 × HTTP 200 and a consistent index/state afterwards (`01-audit/concurrency_scale.out`).
 
 ## 8. Quality baseline and frozen gate
 
