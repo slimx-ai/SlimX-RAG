@@ -45,6 +45,29 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
   document's `doc_id` in addition to the bookkept ids (`swept_chunks` reported), so a lost
   state commit can never leave deleted or superseded content retrievable.
 
+### Author-side review corrections (2026-09-25, same release)
+
+- Plain text: blank lines are paragraph boundaries again in `structure_block`, so a multi-
+  paragraph text document yields PARAGRAPH elements instead of one block force-split at word
+  positions.
+- Text sources decode as UTF-8 (BOM tolerated), else Windows-1252, else Latin-1; accented legacy
+  text is no longer mistaken for binary.
+- `document_ids` requires `workspace_id` on every endpoint (422): the same document id may exist
+  in several workspaces.
+- `/api/eval/run` accepts `workspace_id`/`document_ids`, honours `RAG_REQUIRE_WORKSPACE_SCOPE`,
+  returns 422 for unreadable or malformed datasets (blank/oversized questions), and `/api/retrieve`
+  metadata carries `kb_relpath` so `hit@k` is computed from real sources on the hybrid path.
+- Embedding failures during indexing return 503 `embedding_failed` (`retryable: true`); a query
+  dimension mismatch maps to `embedding_dim_mismatch`.
+- `GET /api/documents/{id}/chunks` is authoritative on enumerable backends (chunks the
+  bookkeeping lost are listed too, in ordinal order), matching the delete sweep.
+- Ancestor headings ride in the identity prefix (`Path: A > B`) and in exact-identifier matching,
+  so an identifier that lives only in a heading-only parent stays reachable.
+- Build: the base-image label reflects `ARG PYTHON_IMAGE`; the BuildKit syntax directive is gone;
+  `uv lock --check` guards the image build and the candidate workflow; CI pins uv 0.9.18 and
+  lock-verifies the service extra set on one leg; the GPU Dockerfile reinstalls CUDA torch and
+  asserts it (still unverified, not part of the CPU qualification).
+
 ### Added
 
 - `/api/retrieve` responses carry `vector_backend`.

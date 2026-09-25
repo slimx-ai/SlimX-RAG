@@ -111,6 +111,11 @@ def structure_block(
         line = raw_lines[i]
         s = line.strip()
         if not s:
+            # A blank line is a paragraph boundary: keep it so ``_norm_paragraphs`` splits the
+            # buffered narrative into separate PARAGRAPH elements instead of one block that the
+            # chunker can only force-split at arbitrary word positions.
+            if pending:
+                pending.append("")
             i += 1
             continue
 
@@ -216,8 +221,36 @@ def detect_source_type(filename: str, mime_type: str | None) -> str:
     return "text"
 
 
+_TEXT_CONTROL_OK = {"\t", "\n", "\r", "\x0c"}
+
+
+def _control_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    bad = sum(1 for ch in text if (ord(ch) < 32 and ch not in _TEXT_CONTROL_OK) or ch == "\ufffd")
+    return bad / len(text)
+
+
+def decode_text(content: bytes) -> str:
+    """Decode text bytes: UTF-8 (BOM tolerated), else Windows-1252, else Latin-1.
+
+    Legacy editors still save accented prose as cp1252/Latin-1; decoding it as UTF-8 with
+    replacement would garble every accented letter (and previously made such files look
+    binary). Callers should check :func:`looks_binary` first.
+    """
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return content.decode("cp1252")
+    except UnicodeDecodeError:
+        return content.decode("latin-1")
+
+
 def looks_binary(content: bytes | str | None, *, sample_bytes: int = 65536) -> bool:
-    """True when byte content cannot be text: contains NUL or too many undecodable bytes."""
+    """True when byte content cannot be text: NUL bytes, or too many control/undecodable
+    characters under every text decoding the parsers accept (UTF-8, cp1252, Latin-1)."""
     if not isinstance(content, bytes):
         return False
     sample = content[:sample_bytes]
@@ -225,6 +258,4 @@ def looks_binary(content: bytes | str | None, *, sample_bytes: int = 65536) -> b
         return False
     if b"\x00" in sample:
         return True
-    decoded = sample.decode("utf-8", errors="replace")
-    bad = decoded.count("\ufffd")
-    return bad > 0 and (bad / max(1, len(decoded))) > _MAX_UNDECODABLE_RATIO
+    return _control_ratio(decode_text(sample)) > _MAX_UNDECODABLE_RATIO

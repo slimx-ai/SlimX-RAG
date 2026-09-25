@@ -1,5 +1,4 @@
-# syntax=docker/dockerfile:1.7
-# SlimX-RAG CPU service image — every build input is immutable (ControlRoom release identity):
+# SlimX-RAG CPU service image — every image input is immutable (ControlRoom release identity):
 #   - base image and the uv tool image are pinned by digest;
 #   - the Python resolution is the committed uv.lock, honoured with --frozen (a build fails if
 #     the lock cannot be satisfied); torch is the CPU wheel from the PyTorch index; SlimX is
@@ -16,6 +15,8 @@ FROM ${UV_IMAGE} AS uv
 
 FROM ${PYTHON_IMAGE}
 
+# Redeclared after FROM so the label below reflects the base this stage was really built from.
+ARG PYTHON_IMAGE
 ARG SOURCE_REVISION=unknown
 ARG VERSION=0.3.0
 # Default embedding model identity baked into the image. RAG_HF_REVISION is an exact commit.
@@ -38,7 +39,8 @@ COPY --from=uv /uv /uvx /bin/
 # (demo = FastAPI server, doc = PDF/DOCX parsers, hf = sentence-transformers, answer = SlimX).
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable \
+RUN uv lock --check \
+  && uv sync --frozen --no-dev --no-editable \
       --extra demo --extra openai --extra qdrant --extra hf --extra doc --extra answer \
   && /app/.venv/bin/python -c "import pypdf, docx, sentence_transformers, slimx, fastapi" \
   && /app/.venv/bin/python -c "import torch; assert not torch.cuda.is_available(); print('torch', torch.__version__)"
@@ -76,7 +78,7 @@ LABEL org.opencontainers.image.title="slimx-rag" \
       org.opencontainers.image.licenses="MIT" \
       ai.slimx.rag.embedding_model="${RAG_HF_MODEL}" \
       ai.slimx.rag.embedding_revision="${RAG_HF_REVISION}" \
-      ai.slimx.rag.base_image="python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9"
+      ai.slimx.rag.base_image="${PYTHON_IMAGE}"
 
 USER 1000:1000
 EXPOSE 8080

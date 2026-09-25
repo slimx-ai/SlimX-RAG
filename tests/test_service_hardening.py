@@ -173,9 +173,11 @@ def test_retrieve_rejects_empty_scope_values_instead_of_widening(client: TestCli
         ).status_code
         == 422
     )
-    # A valid scope still works and never crosses the workspace.
+    # A valid scope still works and never crosses the workspace; document_ids alone is rejected
+    # in every mode because the same document_id may exist in several workspaces.
     assert _retrieve(client, "vault code", workspace_id="tenantB") == [("tenantB", "public")]
     assert _retrieve(client, "vault code", workspace_id="tenantB", document_ids=["secret"]) == []
+    assert client.post("/api/retrieve", json={"question": "vault", "document_ids": ["secret"]}).status_code == 422
 
 
 def test_require_workspace_scope_mode_fails_closed(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,8 +187,11 @@ def test_require_workspace_scope_mode_fails_closed(client: TestClient, monkeypat
         res = client.post(path, json={"question": "vault code"})
         assert res.status_code == 400, res.text
         assert res.json()["detail"]["code"] == "workspace_scope_required"
+        # document_ids never replaces the workspace: rejected by validation in every mode.
         res = client.post(path, json={"question": "vault code", "document_ids": ["secret"]})
-        assert res.status_code == 400
+        assert res.status_code == 422
+    res = client.post("/api/eval/run", json={"dataset": "examples/research_demo/eval/questions.jsonl"})
+    assert res.status_code == 400 and res.json()["detail"]["code"] == "workspace_scope_required"
     assert _retrieve(client, "vault code", workspace_id="tenantA") == [("tenantA", "secret")]
     monkeypatch.delenv("RAG_REQUIRE_WORKSPACE_SCOPE")
     assert client.post("/api/retrieve", json={"question": "vault code"}).status_code == 200  # default stays permissive
@@ -345,3 +350,115 @@ def test_eval_dataset_is_confined_and_model_override_is_opt_in(
         "/api/ask", json={"question": "What does SlimX build?", "workspace_id": "w", "model": "fake:override"}
     )
     assert res.status_code == 200 and res.json()["model_trace"]["model"] == "fake:override"
+
+
+# --- author-review corrections (2026-09-25) ---------------------------------------------------
+
+
+def test_paragraph_boundaries_survive_in_plain_text() -> None:
+    from slimx_rag.document.model import ElementType
+
+    text = "\n\n".join(f"Paragraph {i}: the pelican colony on island {i} counted nests." for i in range(4))
+    parsed = parse_document(DocumentSource(document_id="x", filename="notes.txt", content=text.encode()))
+    paragraphs = [el for el in parsed.elements if el.element_type == ElementType.PARAGRAPH]
+    assert len(paragraphs) == 4  # previously one block, force-split at arbitrary word positions
+    assert paragraphs[0].text.startswith("Paragraph 0") and paragraphs[3].text.startswith("Paragraph 3")
+
+
+def test_cp1252_and_utf8_bom_text_are_text_not_binary() -> None:
+    from slimx_rag.document.structure import decode_text
+
+    french = "Le r\u00e9glage de l'\u00e9cart de la t\u00eate laser est fix\u00e9 \u00e0 0,42 mm. " * 20
+    cp1252 = french.encode("cp1252")
+    assert not looks_binary(cp1252)
+    assert decode_text(cp1252) == french
+    bom = "\ufeffPlain notes".encode()
+    assert not looks_binary(bom) and decode_text(bom) == "Plain notes"
+    parsed = parse_document(DocumentSource(document_id="x", filename="notes.txt", content=cp1252))
+    assert "t\u00eate laser" in parsed.pages[0].text
+
+
+def test_eval_run_reports_hits_by_source_and_honours_scope(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _index(client, "w", "d", "SlimX builds explicit inspectable research AI systems.")
+    _index(client, "other", "d", "Unrelated other-workspace text about pelicans.")
+    allowed = tmp_path / "datasets"
+    allowed.mkdir()
+    dataset = allowed / "q.jsonl"
+    dataset.write_text('{"question": "What does SlimX build?", "expected_sources": ["w/d"]}\n', encoding="utf-8")
+    monkeypatch.setenv("RAG_EVAL_DATASET_DIR", str(allowed))
+    res = client.post("/api/eval/run", json={"dataset": str(dataset), "workspace_id": "w"})
+    assert res.status_code == 200, res.text
+    case = res.json()["cases"][0]
+    assert case["hit"] is True and case["retrieved_sources"][0] == "w/d"  # kb_relpath travels on the hybrid path
+    res = client.post("/api/eval/run", json={"dataset": str(dataset), "workspace_id": "other"})
+    assert res.json()["cases"][0]["retrieved_sources"] == ["other/d"]
+    assert client.post("/api/eval/run", json={"dataset": str(allowed)}).status_code == 422  # a directory
+    (allowed / "blank.jsonl").write_text('{"question": "   "}\n', encoding="utf-8")
+    res = client.post("/api/eval/run", json={"dataset": str(allowed / "blank.jsonl")})
+    assert res.status_code == 422 and res.json()["detail"]["code"] == "eval_dataset_malformed"
+
+
+def test_embedding_failure_is_a_structured_retryable_503(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from slimx_rag.embed.embedder import HashEmbedder
+
+    def boom(self, texts):  # noqa: ANN001, ANN202
+        raise RuntimeError("provider timed out")
+
+    monkeypatch.setattr(HashEmbedder, "embed_documents", boom)
+    monkeypatch.setattr(HashEmbedder, "embed_texts", boom)
+    res = _index(client, "w", "d", "text")
+    assert res.status_code == 503, res.text
+    assert res.json()["detail"]["code"] == "embedding_failed" and res.json()["detail"]["retryable"] is True
+    res = client.post(
+        "/api/index/file",
+        data={"workspace_id": "w", "document_id": "f", "filename": "n.md"},
+        files={"file": ("n.md", b"# hi\n\nbody", "text/markdown")},
+    )
+    assert res.status_code == 503 and res.json()["detail"]["code"] == "embedding_failed"
+
+
+def test_query_dimension_mismatch_reports_embedding_dim_mismatch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _index(client, "w", "d", "A healthy document about pelicans.").status_code == 200
+    monkeypatch.setenv("RAG_EMBED_DIM", "32")
+    from slimx_rag.embed import reset_embedder_cache
+
+    reset_embedder_cache()
+    res = client.post("/api/retrieve", json={"question": "pelicans", "workspace_id": "w"})
+    assert res.status_code == 503 and res.json()["detail"]["code"] == "embedding_dim_mismatch"
+
+
+def test_chunk_listing_is_authoritative_after_a_lost_state_commit(client: TestClient, tmp_path: Path) -> None:
+    assert (
+        _index(client, "w", "doomed", "First paragraph about zebrafish.\n\nSecond paragraph about newts.").status_code
+        == 200
+    )
+    before = client.get("/api/documents/doomed/chunks", params={"workspace_id": "w"}).json()
+    _lose_state_commit(tmp_path / "out" / "index_state.json")
+    after = client.get("/api/documents/doomed/chunks", params={"workspace_id": "w"}).json()
+    assert after["chunk_count"] == before["chunk_count"] > 0
+    assert [c["chunk_id"] for c in after["chunks"]] == [c["chunk_id"] for c in before["chunks"]]
+
+
+def test_identifier_that_lives_only_in_an_empty_heading_stays_reachable(client: TestClient) -> None:
+    body = (
+        "# Spec\n\n## Module MAX_PAYLOAD_KG\n\n### Overview\nThe module limits the carriage payload.\n\n"
+        "## Other\n\n### Overview\nUnrelated overview text.\n"
+    )
+    res = client.post(
+        "/api/index/file",
+        data={"workspace_id": "w", "document_id": "spec", "filename": "spec.md", "mime_type": "text/markdown"},
+        files={"file": ("spec.md", body, "text/markdown")},
+    )
+    assert res.status_code == 200, res.text
+    chunks = client.post(
+        "/api/retrieve", json={"question": "What does MAX_PAYLOAD_KG do?", "workspace_id": "w"}
+    ).json()["chunks"]
+    top = chunks[0]
+    assert top["metadata"]["section_path"] == ["Spec", "Module MAX_PAYLOAD_KG", "Overview"]
+    assert top["metadata"]["exact_match"] is True  # matched through the ancestor heading
+    listing = client.get("/api/documents/spec/chunks", params={"workspace_id": "w"}).json()["chunks"]
+    assert all("Module MAX_PAYLOAD_KG" not in (c["text"] or "") or "Path:" not in c["text"] for c in listing)

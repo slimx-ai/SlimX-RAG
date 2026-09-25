@@ -7,7 +7,7 @@ keeps its ``LABEL: value`` blocks coherent, while ordinary prose becomes paragra
 from __future__ import annotations
 
 from ..model import DocumentSource, ParsedDocument, ParsedPage
-from ..structure import detect_source_type, looks_binary, structure_block
+from ..structure import decode_text, detect_source_type, looks_binary, structure_block
 
 PARSER_NAME = "native-text"
 PARSER_VERSION = "1"
@@ -18,7 +18,7 @@ def _as_text(source: DocumentSource) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, bytes):
-        return content.decode("utf-8", errors="replace")
+        return decode_text(content)
     return ""
 
 

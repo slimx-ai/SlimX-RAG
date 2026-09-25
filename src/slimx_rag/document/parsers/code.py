@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 
 from ..model import DocumentSource, ElementType, PageType, ParsedDocument, ParsedElement, ParsedPage
-from ..structure import looks_binary
+from ..structure import decode_text, looks_binary
 
 PARSER_NAME = "native-code"
 PARSER_VERSION = "1"
@@ -41,7 +41,7 @@ def _as_text(source: DocumentSource) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, bytes):
-        return content.decode("utf-8", errors="replace")
+        return decode_text(content)
     return ""
 
 

@@ -81,6 +81,15 @@ def test_embedding_model_is_baked_at_an_exact_commit_and_runtime_is_offline() ->
     assert "RAG_HF_REVISION:=" in (ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8")
 
 
+def test_base_image_label_reflects_the_build_argument() -> None:
+    for dockerfile in (DOCKERFILE, GPU_DOCKERFILE):
+        assert 'ai.slimx.rag.base_image="${PYTHON_IMAGE}"' in dockerfile
+        assert not dockerfile.startswith("# syntax=")  # the BuildKit frontend is not a pinned input
+    assert "uv lock --check" in DOCKERFILE and "uv lock --check" in PUBLISH
+    assert "pip install uv==0.9.18" in CI and "--extra answer" in CI
+    assert "--reinstall-package torch" in GPU_DOCKERFILE and "torch==2.7.1+cu124" in GPU_DOCKERFILE
+
+
 def test_image_metadata_and_runtime_user() -> None:
     for label in (
         "org.opencontainers.image.source",

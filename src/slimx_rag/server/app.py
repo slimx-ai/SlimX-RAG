@@ -13,7 +13,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from langchain_core.documents import Document
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from slimx_rag.answer import answer
 from slimx_rag.chunk import TokenCounter, chunk_parsed_document
@@ -367,6 +367,11 @@ def _to_chunk_record(result: SearchResult) -> ChunkRecord:
         # A heading path, a page of a paginated document or a field label locates the passage;
         # the inferred first line of an unpaginated text document does not.
         section_is_locator=bool(md.get("section_path")) or page_number is not None or (section != entry),
+        section_path=(
+            tuple(str(part) for part in raw_path)
+            if isinstance(raw_path := md.get("section_path"), (list, tuple))
+            else ()
+        ),
     )
 
 
@@ -544,18 +549,44 @@ class QuestionRequest(BaseModel):
 
     @field_validator("document_ids")
     @classmethod
-    def _document_ids_valid(cls, value: list[str] | None) -> list[str] | None:
+    def _document_ids_valid(cls, value: list[str] | None, info: Any) -> list[str] | None:
         if value is not None:
             for item in value:
                 if (problem := _identifier_problem(item)) is not None:
                     raise ValueError(f"document_ids entries {problem}")
+            # document_ids narrows a workspace and never replaces it: the same document_id may
+            # exist in several workspaces, so without workspace_id it would match all of them.
+            if info.data.get("workspace_id") is None:
+                raise ValueError("document_ids requires workspace_id")
         return value
 
 
 class EvalRequest(BaseModel):
     dataset: str = "examples/research_demo/eval/questions.jsonl"
     model: str | None = None
-    top_k: int | None = Field(default=None, gt=0)
+    top_k: int | None = Field(default=None, gt=0, le=MAX_TOP_K)
+    # Optional retrieval scope applied to every case (same rules as QuestionRequest); with
+    # RAG_REQUIRE_WORKSPACE_SCOPE the evaluation refuses to run unscoped.
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=MAX_IDENTIFIER_CHARS)
+    document_ids: list[str] | None = Field(default=None, min_length=1, max_length=MAX_SCOPE_DOCUMENT_IDS)
+
+    @field_validator("workspace_id")
+    @classmethod
+    def _workspace_id_valid(cls, value: str | None) -> str | None:
+        if value is not None and (problem := _identifier_problem(value)) is not None:
+            raise ValueError(f"workspace_id {problem}")
+        return value
+
+    @field_validator("document_ids")
+    @classmethod
+    def _document_ids_valid(cls, value: list[str] | None, info: Any) -> list[str] | None:
+        if value is not None:
+            for item in value:
+                if (problem := _identifier_problem(item)) is not None:
+                    raise ValueError(f"document_ids entries {problem}")
+            if info.data.get("workspace_id") is None:
+                raise ValueError("document_ids requires workspace_id")
+        return value
 
 
 class IndexRequest(BaseModel):
@@ -599,7 +630,7 @@ _RESERVED_METADATA_KEYS = frozenset(
 )
 
 
-def _require_workspace_scope(payload: QuestionRequest) -> None:
+def _require_workspace_scope(payload: QuestionRequest | EvalRequest) -> None:
     """With RAG_REQUIRE_WORKSPACE_SCOPE set, retrieval without a workspace fails closed."""
     if payload.workspace_id is None and os.getenv("RAG_REQUIRE_WORKSPACE_SCOPE", "").lower() in ("1", "true", "yes"):
         raise HTTPException(
@@ -620,7 +651,9 @@ def _service_failure(exc: Exception) -> HTTPException:
         code, status = "index_state_invalid", 503
     elif "index build receipt" in message.lower():
         code, status = "index_build_receipt_invalid", 409
-    elif "dim" in message.lower() and "mismatch" in message.lower() or "mixed vector dimensions" in message:
+    elif (
+        "dim" in message.lower() and ("mismatch" in message.lower() or "does not match" in message.lower())
+    ) or "mixed vector dimensions" in message:
         code, status = "embedding_dim_mismatch", 503
     elif isinstance(exc, TimeoutError):
         code, status = "index_instance_id_unavailable", 503
@@ -650,6 +683,28 @@ def _embedder_or_503(embed_settings: EmbedSettings) -> Embedder:
                 "owner_action": "Check GET /ready and the embedding configuration (model, device).",
             },
         ) from exc
+
+
+def _embed_or_503(docs: list[Document], *, embed_settings: EmbedSettings, embedder: Embedder) -> list[EmbeddedChunk]:
+    """Embed under the embed lock; a provider/model failure is a structured, retryable 503."""
+    try:
+        with _embed_lock:
+            return list(embed_chunks(iter(docs), settings=embed_settings, embedder=embedder))
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — hf/openai failures must not surface as bare 500s
+        failure = _service_failure(exc)
+        if isinstance(failure.detail, dict) and failure.detail.get("code") == "backend_load_failed":
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "embedding_failed",
+                    "retryable": True,
+                    "error_type": type(exc).__name__,
+                    "owner_action": "Check GET /ready and the embedding provider; retry the indexing request.",
+                },
+            ) from exc
+        raise failure from exc
 
 
 def _resolve_answer_model(requested: str | None) -> str:
@@ -1395,6 +1450,7 @@ def _hybrid_retrieve_response(
                 "metadata": {
                     "document_id": md.get("document_id"),
                     "workspace_id": md.get("workspace_id"),
+                    "kb_relpath": md.get("kb_relpath"),
                     "parent_id": r.parent_id,
                     "page": r.page_number,
                     "section": r.section,
@@ -1513,16 +1569,19 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
     embedder = _embedder_or_503(embed_settings)
     token_counter = embedder.token_counter()
     title = str(metadata.get("title") or "")
-    parsed = parse_document(
-        DocumentSource(
-            document_id=payload.document_id,
-            filename=f"{payload.document_id}.txt",
-            mime_type="text/plain",
-            content=payload.text,
-            workspace_id=payload.workspace_id,
-            metadata={"title": title} if title else {},
+    try:
+        parsed = parse_document(
+            DocumentSource(
+                document_id=payload.document_id,
+                filename=f"{payload.document_id}.txt",
+                mime_type="text/plain",
+                content=payload.text,
+                workspace_id=payload.workspace_id,
+                metadata={"title": title} if title else {},
+            )
         )
-    )
+    except DocumentError as exc:
+        raise HTTPException(status_code=422, detail=f"parse_failed: {type(exc).__name__}: {exc}") from exc
     chunks = _chunks_to_documents(
         chunk_parsed_document(parsed, settings=structured_chunk_settings, token_counter=token_counter),
         workspace_id=payload.workspace_id,
@@ -1534,8 +1593,7 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
     for chunk in chunks:
         for key, value in metadata.items():
             chunk.metadata.setdefault(key, value)
-    with _embed_lock:
-        items: list[EmbeddedChunk] = list(embed_chunks(iter(chunks), settings=embed_settings, embedder=embedder))
+    items: list[EmbeddedChunk] = _embed_or_503(chunks, embed_settings=embed_settings, embedder=embedder)
 
     try:
         return _publish_text_document(
@@ -1751,8 +1809,7 @@ def index_file_endpoint(
     )
 
     t2 = time.perf_counter()
-    with _embed_lock:  # embedding off the index lock
-        items: list[EmbeddedChunk] = list(embed_chunks(iter(docs), settings=embed_settings, embedder=embedder))
+    items: list[EmbeddedChunk] = _embed_or_503(docs, embed_settings=embed_settings, embedder=embedder)
     timings["embed_ms"] = int((time.perf_counter() - t2) * 1000)
 
     t3 = time.perf_counter()
@@ -1942,6 +1999,17 @@ def document_chunks_endpoint(
             entry = backend.state.docs.get(doc_id) or {}
             chunk_ids = [str(c) for c in (entry.get("chunk_ids") or [])]
             stored = backend.get_chunks(chunk_ids)
+            # Authoritative on enumerable backends (like delete): chunks tagged with this
+            # document that the bookkeeping lost (crash between save and commit) are listed
+            # too, in ordinal order, so the inspection view agrees with retrieval.
+            known = set(chunk_ids)
+            stray = [
+                SearchResult(chunk_id=cid, score=0.0, text=text, metadata=md)
+                for cid, text, md in backend.iter_chunks()
+                if cid not in known and str((md or {}).get("doc_id")) == doc_id
+            ]
+            stray.sort(key=lambda sr: (_as_int((sr.metadata or {}).get("ordinal")), sr.chunk_id))
+            stored = stored + stray
     except Exception as exc:  # noqa: BLE001
         raise _service_failure(exc) from exc
     chunks: list[dict[str, Any]] = []
@@ -2083,6 +2151,7 @@ def _retrieval_for_answer(payload: QuestionRequest, embed_settings: EmbedSetting
 @app.post("/api/eval/run")
 def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
     _check_token(authorization)
+    _require_workspace_scope(payload)
     dataset = _resolve_eval_dataset(payload.dataset)
     try:
         cases = load_eval_cases(dataset)
@@ -2090,12 +2159,29 @@ def eval_endpoint(payload: EvalRequest, authorization: str | None = Header(defau
         raise HTTPException(status_code=404, detail={"code": "eval_dataset_not_found"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"code": "eval_dataset_malformed"}) from exc
+    except OSError as exc:
+        raise HTTPException(
+            status_code=422, detail={"code": "eval_dataset_unreadable", "error_type": type(exc).__name__}
+        ) from exc
     model: str = _resolve_answer_model(payload.model)
     embed_settings = _embed_settings()
     top_k = payload.top_k or _index_settings().top_k
+    for case in cases:
+        try:
+            QuestionRequest(question=case.question, top_k=top_k)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422, detail={"code": "eval_dataset_malformed", "question": case.question[:80]}
+            ) from exc
 
     def retriever(question: str) -> RetrievalResult:
-        return _retrieval_for_answer(QuestionRequest(question=question, top_k=top_k), embed_settings)
+        request = QuestionRequest(
+            question=question,
+            top_k=top_k,
+            workspace_id=payload.workspace_id,
+            document_ids=payload.document_ids,
+        )
+        return _retrieval_for_answer(request, embed_settings)
 
     try:
         report = run_eval(

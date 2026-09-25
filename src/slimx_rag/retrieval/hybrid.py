@@ -49,6 +49,9 @@ class ChunkRecord:
     # title of a paginated document, or a field label); False when it merely repeats the
     # inferred title of an unpaginated text document.
     section_is_locator: bool = True
+    # Ancestor headings; identifiers that occur only in a heading-only parent are matched
+    # exactly through these (they are also embedded in the identity prefix).
+    section_path: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -154,6 +157,7 @@ class HybridRetriever:
                 set(lexical_tokens(rec.source_title))
                 | set(lexical_tokens(rec.entry))
                 | set(lexical_tokens(rec.section or ""))
+                | set(lexical_tokens(" ".join(rec.section_path)))
             )
             exact = bool(q_ids & identity_tokens)
             text_exact = bool(q_ids & set(lexical_tokens(rec.text)))

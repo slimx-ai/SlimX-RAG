@@ -8,7 +8,8 @@ name: Publish image
 #   registry digest (printed in the job summary and uploaded as an artifact) is the release
 #   identity a downstream app (ControlRoom) pins; the tag is a convenience.
 # * release (GitHub release published): the historical semver + `latest` CPU publication and
-#   the GPU variant. Unchanged in intent, but also pinned inputs and attestations.
+#   the GPU variant. Unchanged in intent; it uses the same pinned inputs and BuildKit SBOM/
+#   provenance but carries no GitHub attestation (only the candidate path does).
 on:
   release:
     types: [published]
@@ -43,6 +44,11 @@ jobs:
       - name: Read the package version
         id: version
         run: echo "version=$(python3 -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")" >> "$GITHUB_OUTPUT"
+
+      - name: The committed lock must match pyproject at the dispatched commit
+        run: |
+          python3 -m pip install --quiet uv==0.9.18
+          uv lock --check
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3

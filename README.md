@@ -142,12 +142,12 @@ embedding configuration changed. Configure the canonical service token first; th
 | `RAG_HF_REVISION` | Exact Hugging Face commit for the `hf` embedder; the published image pins it so a mutable `main` is never adopted at runtime. |
 | `RAG_EMBED_QUERY_PREFIX` / `RAG_EMBED_DOCUMENT_PREFIX` | Prefixes for asymmetric embedding models (part of the embedding identity). |
 | `RAG_ALLOW_MODEL_OVERRIDE=1` | Lets `/api/ask` and `/api/eval/run` honour a caller-supplied `model`; off by default (provider egress with server credentials). |
-| `RAG_EVAL_DATASET_DIR` | Directory eval datasets must live in (default `examples`). |
+| `RAG_EVAL_DATASET_DIR` | Directory eval datasets must live in (default `examples`). `/api/eval/run` accepts `workspace_id`/`document_ids` like `/api/retrieve`. |
 | `RAG_MAX_QUESTION_CHARS`, `RAG_MAX_TOP_K`, `RAG_MAX_SCOPE_DOCUMENT_IDS` | Request bounds (defaults 20000, 200, 10000). |
 
 `workspace_id`/`document_id` must be non-empty and must not contain `/` or control characters
 (422). Empty `workspace_id`, empty `document_ids` or empty entries are rejected instead of
-silently widening the scope. Binary files and HTML are rejected by `/api/index/file` with
+silently widening the scope, and `document_ids` always requires `workspace_id`. Binary files and HTML are rejected by `/api/index/file` with
 422 `parse_failed: UnsupportedDocumentError` so a host can fall back to its own extracted text.
 
 `DEMO_AUTH_TOKEN` is deliberately insufficient for this destructive endpoint:

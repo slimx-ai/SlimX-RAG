@@ -86,7 +86,14 @@ def _iter_parents(doc: ParsedDocument) -> Iterator[_Parent]:
             )
 
 
-def _identity_prefix(*, source_title: str, page_number: int | None, entry: str | None, section: str | None) -> str:
+def _identity_prefix(
+    *,
+    source_title: str,
+    page_number: int | None,
+    entry: str | None,
+    section: str | None,
+    section_path: tuple[str, ...] = (),
+) -> str:
     lines = [f"Document: {source_title}"]
     if page_number is not None:
         lines.append(f"Page: {page_number}")
@@ -94,6 +101,11 @@ def _identity_prefix(*, source_title: str, page_number: int | None, entry: str |
         lines.append(f"Entry: {entry}")
     if section and section != entry:
         lines.append(f"Section: {section}")
+    # Ancestor headings (a heading-only parent emits no chunk of its own, so an identifier
+    # that lives only in such a heading must survive in its descendants' identity).
+    ancestors = [h for h in section_path[:-1] if h and h != source_title]
+    if ancestors:
+        lines.append("Path: " + " > ".join(ancestors))
     return "\n".join(lines)
 
 
@@ -193,6 +205,7 @@ def _chunk_parent(
             page_number=parent.page_number,
             entry=parent.title,
             section=section,
+            section_path=parent.section_path,
         )
 
     # Budget so prefix + content never exceeds the hard cap. The whole-parent check uses
