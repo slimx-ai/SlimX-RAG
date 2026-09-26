@@ -103,8 +103,14 @@ def _identity_prefix(
     section: str | None,
     section_path: tuple[str, ...] = (),
     own_title: str | None = None,
+    language: str | None = None,
 ) -> str:
     lines = [f"Document: {source_title}"]
+    # A source-code document is addressed by its language as well ("the Python function that
+    # ..."): the parser infers it from the file extension only, so the line is a fact about the
+    # document, like a page number, not a guess.
+    if language:
+        lines.append(f"Language: {language}")
     # ControlRoom sends the upload filename as the title. Keep the document's own title (its
     # heading, DOCX title or first line) in the identity so an identifier in that heading still
     # matches; the filename's words are NOT spelled out here (measured: they put the shared
@@ -139,6 +145,14 @@ def _is_field_addressed(parent: _Parent) -> bool:
         return False
     labelled = [el for el in parent.elements if el.element_type == ElementType.FIELD and el.metadata.get("label")]
     return len(labelled) >= 2
+
+
+def _document_language(doc: ParsedDocument) -> str | None:
+    """The source language of a code document (parser-inferred from the extension), else None."""
+    if doc.source_type != "code":
+        return None
+    language = doc.metadata.get("language")
+    return str(language) if language else None
 
 
 def _child_section(parent: _Parent, els: list[ParsedElement]) -> str | None:
@@ -239,6 +253,7 @@ def _chunk_parent(
             section=section,
             section_path=parent.section_path,
             own_title=doc.own_title,
+            language=_document_language(doc),
         )
 
     # Budget so prefix + content never exceeds the hard cap. The whole-parent check uses
@@ -297,6 +312,8 @@ def _chunk_parent(
                     "page_type": parent.page_type.value,
                     # Every unit of a field-addressed sheet shares one retrieval parent.
                     "field_addressed": field_addressed,
+                    # Source language of a code document (None otherwise); also an identity line.
+                    "language": _document_language(doc),
                 },
             )
         )

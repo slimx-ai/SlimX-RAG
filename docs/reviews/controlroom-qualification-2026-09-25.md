@@ -507,7 +507,7 @@ Every finding was re-verified by execution before correction; dispositions:
 | RAG-AUD-042 | Medium | `str(md.get("workspace_id"))` turned a missing value into `"None"`, so `{"workspace_id":"None"}` returned unscoped chunks under `RAG_REQUIRE_WORKSPACE_SCOPE`. | Corrected in the hybrid and dense-only scope filters: missing or non-string metadata is out of scope; test. |
 | RAG-AUD-043 | Low | BM25 statistics span every workspace (lexical scores move with other tenants' text; term frequency inferable). | Documented as a known limitation (README, CHANGELOG); candidates and text never cross scope (RAG-AUD-006/031). |
 | RAG-AUD-044 | Low | The benchmark never set `RAG_HF_REVISION`, so reports recorded the cache's `refs/main` (`1110a243`, byte-identical weights) while the record claimed `c9745ed1`. | Corrected: the runner pins `DEFAULT_HF_REVISION = c9745ed1…` (recorded in the report, CLI `--hf-revision`); the earlier records are annotated below. |
-| RAG-AUD-045 | Low | `forbidden_text_hits` / `updated_doc_stale_hits` count matches in any returned document, so a legitimately different document that mentions the forbidden name ("Jonas Berg" in the March incident's attendee table) fails two hard checks. | NOT changed: a metric-semantics change to the frozen harness needs the owner's authorization (proposal: count forbidden text only in results from the updated document). |
+| RAG-AUD-045 | Low | `forbidden_text_hits` / `updated_doc_stale_hits` count matches in any returned document, so a legitimately different document that mentions the forbidden name ("Jonas Berg" in the March incident's attendee table) fails two hard checks. | Owner-authorized 2026-09-26 and corrected in evaluator version 2 (§13): lifecycle stale text counts only in the revised document's own chunks; the global count stays visible as `forbidden_text_hits_any_document`. |
 | RAG-AUD-046 | Low | `/api/index` had no text bound and no element cap; posting `""` for an existing document returned 200 and silently emptied it (reproduced). | Corrected: `text` bounded (`RAG_MAX_TEXT_CHARS`), blank rejected (422), element cap applied (413); test. |
 | RAG-AUD-047 | Low | `b5447ef8` and `0a7bfb69` chunk differently under one shaping version. | Corrected: `index-shaping-v4` (also covers the identity change); `b5447ef8`/`0a7bfb69` volumes rebuild. |
 | RAG-AUD-048 | Low | One stray byte made `decode_text` fall back to cp1252 for the whole file (mojibake). | Corrected: UTF-8 with replacement when stray bytes are sparse (<= 0.5 %); legacy encodings still fall back; test. |
@@ -551,7 +551,80 @@ It confirmed RAG-AUD-039..044 and 046..048 corrected and returned B for the foll
 | RAG-AUD-054 | Low | The UTF-8 replacement ratio was measured against the whole text, so a long English cp1252 note with sparse accents decoded to mojibake. | Corrected: the ratio is measured against the non-ASCII bytes; a sparse-cp1252 test added. |
 | RAG-AUD-055 | Info | A tautological assertion in a test; the admin-revision test uses the hash provider (the hf preflight was verified in the image); an acronym filename boosts every chunk of its file, consistent with human titles and unmeasured. | The assertion is fixed; the rest recorded. |
 
-Still for the owner (unchanged): RAG-AUD-045 (stale-text metric semantics) and whether ControlRoom's
-filename regime becomes the official gate regime (under it, top-1 source is 42 of 46 = 0.913 against
-0.93, the deciding case being file-014's fused tie).
+Both owner decisions were taken on 2026-09-26 and are implemented in §13: RAG-AUD-045 (evaluator
+version 2) and the filename regime as a second mandatory gate (under it, top-1 source was 42 of 46 =
+0.913 against 0.93, the deciding case being file-014's fused tie; §13 diagnoses and corrects it).
+
+## 13. Owner decisions on the benchmark (2026-09-26) and their implementation
+
+Owner instruction (2026-09-26): preserve the original 26-check gate unchanged; correct only the
+demonstrably unsound stale-text evaluator semantics (RAG-AUD-045); add ControlRoom's filename-title
+regime as a separate, mandatory qualification gate; make the candidate pass both without lowering a
+threshold or changing a gold case; a remaining top-1 shortfall under the filename regime is a real
+quality failure to diagnose, not to waive; rerun the image and the cross-repository smoke if source
+moves; then stop with a new final head and an updated Codex prompt. No publication or merge.
+
+### 13.1 Evaluator version 2 (RAG-AUD-045)
+
+`forbidden_text_hits` (and the derived `updated_doc_stale_hits`) counted a forbidden string in any
+returned chunk. Under the filename regime the question of upd-043c ("Which technician performed the
+last Atlas service?") legitimately retrieves the March incident report, whose attendee table lists
+"Jonas Berg, Technician"; that chunk is current content of a different document, not the maintenance
+log's previous revision, yet it failed two hard checks. `metrics.EVALUATOR_VERSION = "2"`: in the
+lifecycle phases the forbidden text counts only inside the revised document's own chunks — the
+re-indexed document (`after_update`, same document id) and the deleted documents (`after_delete`).
+Isolation cases keep the global rule (their forbidden text marks another workspace's or project's
+content, already tied to `forbidden_docs`). The global occurrence stays visible per case as
+`forbidden_text_hits_any_document` and in the report's `forbidden_text_any_document` (informational,
+not gated). Every report records `evaluator_version`; a gate file may pin it. Thresholds, gold cases,
+corpus, model and reranking policy are unchanged. Unit tests cover the four semantics (updated document
+with the old text = stale; another document's mention = not stale; deleted document served = stale;
+isolation = global).
+
+### 13.2 Two mandatory gates
+
+`quality-gate.json` is byte-for-byte unchanged (the historical gate; sha256 `0d506812…`).
+`quality-gate-filename.json` copies every threshold unchanged and pins `title_mode: filename` and
+`evaluator_version: 2` (`evaluate_gate` adds a failing `title_mode` / `evaluator_version` check on a
+mismatch, so a benchmark-title report cannot satisfy the filename gate); a test asserts the two files'
+`hard`, `hard_by_provider` and `ranking` sections are identical and that the original carries no pin.
+The deterministic hash run under filename titles now holds the hard invariants in the test suite as
+well. `gate-result.json` names the gate, dataset, evaluator and regime.
+
+### 13.3 The remaining filename-regime failure: file-014 (retrieval correction, measured)
+
+With evaluator 2 alone the filename regime still failed one check, `top1_expected_source_rate` 0.913
+(42 of 46; the benchmark regime tolerates its three misses conf-036, upd-043a, upd-043b at 43 of 46 =
+0.935). The extra miss is file-014, "Which Python function applies the laser offset from calib_v3.cfg?"
+(expected `atlas_controller.py`). Diagnosis with the full candidate ranking (evidence
+`04-rag-corrections/owner-decisions-2026-09-26/file-014/`): the code unit is dense rank 1 in both
+regimes; the lexical stage ranks it third behind two calibration-procedure paragraphs ("The controller
+applies the laser offset from this file" shares more query terms), and both leaders carry the same
+`calib_v3.cfg` text boost. Under benchmark titles the fused margin was 0.000008 in the code unit's
+favour (dense 1 + lexical 3 against dense 2 + lexical 2); the filename title changed the BM25 length
+normalisation of the calibration chunks and flipped it (dense 2 + lexical 1). The question's
+discriminating words, "Python function", matched nothing in the code unit's identity: the parser
+infers `language = python` from the extension but the chunker dropped it.
+
+Correction (`index-shaping-v5`): a source-code document's chunks carry a `Language: <language>`
+identity line and a `language` metadata key — a fact about the document like a page number, never a
+guess. Measured with the real model, pinned revision, frozen inputs:
+
+| regime | change | hit@1 | hit@3 | hit@5 | MRR | nDCG@8 | exact-id | top-1 source | locator fail | forbidden / stale | gate |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| benchmark | before (7e802dcb) | 0.937 | 0.968 | 1.000 | 0.954 | 0.958 | 1.000 | 0.935 | 0 | 0 / 0 | PASS 26/26 |
+| benchmark | evaluator 2 only | 0.937 | 0.968 | 1.000 | 0.954 | 0.958 | 1.000 | 0.935 | 0 | 0 / 0 | PASS 26/26 (every value identical) |
+| benchmark | evaluator 2 + Language line | 0.937 | 0.968 | 1.000 | 0.954 | 0.958 | 1.000 | 0.935 | 0 | 0 / 0 | PASS 26/26 (every value identical) |
+| filename | before (7e802dcb) | 0.921 | 0.952 | 1.000 | 0.948 | 0.954 | 1.000 | 0.913 | 0 | 1 / 1 | FAIL 3 |
+| filename | evaluator 2 only | 0.921 | 0.952 | 1.000 | 0.948 | 0.954 | 1.000 | 0.913 | 0 | 0 / 0 (any-document 1: upd-043c) | FAIL 1 (top-1) |
+| filename | evaluator 2 + Language line | 0.937 | 0.952 | 1.000 | 0.956 | 0.960 | 1.000 | 0.935 | 0 | 0 / 0 (any-document 1) | PASS 26/26 under `quality-gate-filename.json` |
+
+file-014 is lexical rank 1 in both regimes after the change (fused 0.18279 against 0.18226);
+no other case changed rank in either regime. A benchmark-title report evaluated against the
+filename gate fails exactly the `title_mode` pin (verified). Tests: `tests/test_owner_decisions_2026_09_26.py`.
+
+### 13.4 What was not changed
+
+No threshold, gold case, corpus document, embedding model, revision or reranking policy. The
+Qdrant/pgvector backends are untouched (the line lives in the embedding text and metadata).
 

@@ -9,6 +9,26 @@ from .gold import Case
 
 KS = (1, 3, 5, 8)
 
+# Scoring-semantics version. Recorded in every report; a gate file may pin it (``evaluator_version``).
+#   1 — forbidden text was counted in any returned chunk (global string occurrence).
+#   2 — in the lifecycle phases (``after_update``, ``after_delete``) forbidden text counts only
+#       inside the revised document's own chunks: the updated document for ``after_update`` (the
+#       same document id, re-indexed) and the deleted documents for ``after_delete``. "Stale" is
+#       tied to the document whose earlier revision held the text, not to the text occurring in
+#       another, legitimately retrieved document. Isolation cases keep the global rule. The global
+#       count is still reported per case as ``forbidden_text_hits_any_document`` (informational).
+#       Owner authorization 2026-09-26 (RAG-AUD-045); thresholds, gold cases and corpus unchanged.
+EVALUATOR_VERSION = "2"
+
+
+def stale_source_docs(case: Case) -> set[str] | None:
+    """Documents whose earlier revision a lifecycle case's forbidden text belongs to; None = global rule."""
+    if case.phase == "after_update":
+        return set(case.expected_docs)
+    if case.phase == "after_delete":
+        return set(case.forbidden_docs)
+    return None
+
 
 def _first_ranks(results: list[dict[str, Any]], names: set[str]) -> dict[str, int]:
     """First rank (1-based) at which each named document appears."""
@@ -77,9 +97,20 @@ def evaluate_case(
         1 for r in results if r.get("doc_name") in forbidden and str(r.get("document_id")) in scope_document_ids
     )
     del forbidden_ids
-    row["forbidden_text_hits"] = sum(
-        1 for r in results if any(needle in (r.get("text") or "") for needle in case.forbidden_text_any)
-    )
+
+    def _has_forbidden_text(r: dict[str, Any]) -> bool:
+        return any(needle in (r.get("text") or "") for needle in case.forbidden_text_any)
+
+    forbidden_any_document = sum(1 for r in results if _has_forbidden_text(r))
+    stale_docs = stale_source_docs(case)
+    if stale_docs is None:
+        row["forbidden_text_hits"] = forbidden_any_document
+    else:
+        # Evaluator version 2: stale text is text of the revised document's own chunks.
+        row["forbidden_text_hits"] = sum(
+            1 for r in results if r.get("doc_name") in stale_docs and _has_forbidden_text(r)
+        )
+    row["forbidden_text_hits_any_document"] = forbidden_any_document
     row["stale_deleted_hits"] = (
         sum(1 for r in results if r.get("doc_name") in deleted_names) if case.phase == "after_delete" else 0
     )

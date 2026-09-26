@@ -56,6 +56,11 @@ def evaluate_gate(report: dict[str, Any], gate: dict[str, Any]) -> GateResult:
                 False,
             )
         )
+    # A gate may pin the title regime and the scoring semantics it was frozen for; a report from
+    # another regime or evaluator cannot satisfy it.
+    for key in ("title_mode", "evaluator_version"):
+        if key in gate and str(gate[key]) != str(report.get(key)):
+            checks.append(GateCheck(key, "max", 0, 1, False))
     hard = report.get("hard", {})
     for name, limit in gate.get("hard", {}).items():
         observed = hard.get(name)

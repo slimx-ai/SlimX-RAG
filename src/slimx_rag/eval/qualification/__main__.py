@@ -42,7 +42,15 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({k: report[k] for k in ("provider", "aggregate", "hard", "lifecycle", "latency_ms")}, indent=2))
     if args.gate:
         result = evaluate_gate(report, load_gate(Path(args.gate)))
-        (out / "gate-result.json").write_text(json.dumps(result.to_dict(), indent=2) + "\n", encoding="utf-8")
+        identity = {
+            "gate": Path(args.gate).name,
+            "dataset_version": report.get("dataset_version"),
+            "evaluator_version": report.get("evaluator_version"),
+            "title_mode": report.get("title_mode"),
+        }
+        (out / "gate-result.json").write_text(
+            json.dumps(identity | result.to_dict(), indent=2) + "\n", encoding="utf-8"
+        )
         (out / "gate-result.md").write_text(result.to_markdown(), encoding="utf-8")
         print(result.to_markdown())
         for note in result.skipped:

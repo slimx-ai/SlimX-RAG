@@ -437,6 +437,7 @@ def _chunks_to_documents(
                     "element_types": [t.value for t in ch.element_types],
                     "forced_split": ch.forced_split,
                     "field_addressed": bool(ch.metadata.get("field_addressed", False)),
+                    "language": ch.metadata.get("language"),
                 },
             )
         )
@@ -659,6 +660,7 @@ _RESERVED_METADATA_KEYS = frozenset(
         "element_types",
         "forced_split",
         "field_addressed",
+        "language",
     }
 )
 

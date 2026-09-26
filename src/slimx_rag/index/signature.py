@@ -51,8 +51,11 @@ BACKEND_NAMESPACE_VERSION = "backend-namespace-v1"
 # and cited by its label). index-shaping-v4 (0.3.0, same release): every unit of a field-
 # addressed sheet shares one parent and skips its own title line, and the identity prefix keeps
 # the document's own title beside a caller title (the words of a filename title feed only the
-# exact-identifier identity, not the prefix). Indexes shaped by v1..v3 must be rebuilt.
-INDEX_SHAPING_VERSION = "index-shaping-v4"
+# exact-identifier identity, not the prefix). index-shaping-v5 (0.3.0, same release): a source-code
+# document's chunks carry a "Language: <language>" identity line (parser-inferred from the file
+# extension) and a ``language`` metadata key, so a question about "the Python function that ..."
+# matches the code unit lexically as well as densely. Indexes shaped by v1..v4 must be rebuilt.
+INDEX_SHAPING_VERSION = "index-shaping-v5"
 ENGINE_NAME = "slimx-rag"
 INDEX_INSTANCE_ID_FILENAME = "index_instance_id"
 INDEX_BUILD_RECEIPT_FILENAME = "index_build_receipt.json"

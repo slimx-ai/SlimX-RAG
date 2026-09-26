@@ -130,14 +130,16 @@ Successful indexing responses also include `document_pipeline`:
   parser name/version, and extraction backend/version
 
 The receipt identifies which chunk fingerprint applies to that document. `index_shaping_version`
-is `index-shaping-v4` from 0.3.0: posted text is parsed and chunked by the structured pipeline
+is `index-shaping-v5` from 0.3.0: posted text is parsed and chunked by the structured pipeline
 (every chunk carries parent identity, `page_type`, `section` and `display_text` and embeds the
 identity prefix), heading-only parents emit no chunk, and a heading-less fact sheet that fits the
 budget is addressed by its fields (one unit per labelled field plus one for the remaining
 elements, each displaying the whole sheet, sharing one parent and cited by its label), every unit of
 such a sheet shares one parent, and the identity prefix keeps the document's own title beside a
-caller title (a filename title's words feed only exact-identifier matching), so indexes shaped by v1, v2 or v3 report `index_signature_mismatch` and
-must be rebuilt.
+caller title (a filename title's words feed only exact-identifier matching), and a source-code
+document's chunks carry a `Language: <language>` identity line and a `language` metadata key
+(parser-inferred from the file extension), so indexes shaped by v1 to v4 report
+`index_signature_mismatch` and must be rebuilt.
 
 ## Reset behavior
 

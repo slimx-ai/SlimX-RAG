@@ -3,7 +3,7 @@
 ## 0.3.0 — 2026-09-25 (ControlRoom qualification candidate; no GitHub release yet)
 
 Audit record: `docs/reviews/controlroom-qualification-2026-09-25.md`. Indexes shaped by earlier
-releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v4`).
+releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v5`).
 
 ### Changed (retrieval contract)
 
@@ -44,6 +44,32 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
 - `DELETE /api/documents/{id}` and document replacement sweep every stored chunk tagged with the
   document's `doc_id` in addition to the bookkept ids (`swept_chunks` reported), so a lost
   state commit can never leave deleted or superseded content retrievable.
+
+### Owner decisions on the qualification benchmark (2026-09-26, same release; `index-shaping-v5`)
+
+- Two mandatory quality gates. `quality-gate.json` (the benchmark's own document titles) is
+  unchanged as the historical gate; `quality-gate-filename.json` freezes ControlRoom's title
+  convention (`--title-mode filename`: every document titled by its upload filename) as a second
+  gate with every threshold copied unchanged. A gate may pin `title_mode` and
+  `evaluator_version`; a report from another regime or evaluator fails that check, and
+  `gate-result.json` records the gate, dataset, evaluator and regime. The candidate passes both
+  gates (26 of 26 checks under each; the pins add a failing check only on a mismatch).
+- Evaluator version `2` (recorded as `evaluator_version` in every report): in the lifecycle
+  phases, forbidden text counts only inside the revised document's own chunks (the re-indexed
+  document after an update, the deleted documents after a delete), so a legitimately different
+  document that mentions the old technician's name is no longer "stale" (RAG-AUD-045,
+  owner-authorized). Isolation cases keep the global rule; the global count stays visible per case
+  as `forbidden_text_hits_any_document` and in the report's `forbidden_text_any_document`.
+  Thresholds, gold cases, corpus, model and reranking policy are unchanged; under the benchmark's
+  titles every number is identical to the previous evaluator.
+- A source-code document's chunks carry a `Language: <language>` identity line and a `language`
+  metadata key (the parser infers the language from the file extension only). Measured under
+  ControlRoom's filename titles: the question "Which Python function applies the laser offset
+  from calib_v3.cfg?" ranked a calibration-procedure paragraph first because the lexical stage
+  saw no "Python" in the code unit (dense rank 1, lexical rank 3; a fused margin of 0.00026); with
+  the line the code unit is lexical rank 1 in both regimes. Filename regime: hit@1 0.921 → 0.937,
+  top-1 expected source 0.913 → 0.935, MRR 0.948 → 0.956; benchmark regime unchanged.
+  `index-shaping-v5`; older indexes rebuild.
 
 ### Same-model review 2 corrections (2026-09-26, same release; `index-shaping-v4`)
 

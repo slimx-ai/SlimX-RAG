@@ -243,6 +243,7 @@ def run_qualification(
     fidelity_rows: list[dict[str, Any]] = []
     report: dict[str, Any] = {
         "dataset_version": corpus.version,
+        "evaluator_version": M.EVALUATOR_VERSION,
         "title_mode": title_mode,
         "hf_revision": hf_revision if provider == "hf" else None,
         "provider": provider,
@@ -444,6 +445,15 @@ def run_qualification(
     report["citation_fidelity"] = fidelity
     report["citation_fidelity_failures"] = [row for row in fidelity_rows if not row["ok"]][:200]
     report["hard"] = hard
+    report["forbidden_text_any_document"] = {
+        "hits": sum(r["forbidden_text_hits_any_document"] for r in all_rows),
+        "case_ids": [r["id"] for r in all_rows if r["forbidden_text_hits_any_document"]],
+        "note": (
+            "Informational (evaluator 2): forbidden text found in any returned document; the gated "
+            "hard.forbidden_text_hits / updated_doc_stale_hits count lifecycle stale text in the revised "
+            "document's own chunks only."
+        ),
+    }
     report["aggregate"] = M.aggregate(rows + rows_update)
     report["by_tag"] = M.by_tag(all_rows)
     report["latency_ms"] = {
@@ -493,7 +503,8 @@ def report_markdown(report: dict[str, Any]) -> str:
     lines = [
         f"# ControlRoom qualification report — provider `{report['provider']}`",
         "",
-        f"- dataset: `{report['dataset_version']}`; top_k={report['top_k']}; engine {report.get('engine_version')}",
+        f"- dataset: `{report['dataset_version']}`; evaluator {report.get('evaluator_version')}; "
+        f"title mode `{report.get('title_mode')}`; top_k={report['top_k']}; engine {report.get('engine_version')}",
         f"- corpus: {report['index']['documents']} documents, {report['index']['chunks_total']} chunks, "
         f"index {report['index']['elapsed_ms_total']} ms total (median {report['index']['elapsed_ms_median']} ms/doc, "
         f"max {report['index']['elapsed_ms_max']} ms)",

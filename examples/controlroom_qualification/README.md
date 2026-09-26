@@ -37,9 +37,24 @@ text), in-scope distractor hits, duplicates and distinct documents. The report a
 determinism across two identical passes, restart consistency, index timings, retrieval
 latency (median/p95) and peak RSS.
 
-`quality-gate.json` is the frozen acceptance gate. Its `hard` section is provider-neutral
-and must be zero; its `ranking` thresholds apply to the real CPU model. Do not lower a
-threshold after seeing post-change results without explicit owner authorization.
+Two frozen acceptance gates, both mandatory (owner decision 2026-09-26):
+
+- `quality-gate.json` — the benchmark's own document titles (`--title-mode benchmark`, the
+  default). Unchanged since it was frozen on 2026-09-25; the historical qualification evidence.
+- `quality-gate-filename.json` — ControlRoom's title convention (`--title-mode filename`: every
+  document is titled by its upload filename, as `routes_documents` sends it). Every threshold is
+  copied unchanged from `quality-gate.json`; the file additionally pins `title_mode` and
+  `evaluator_version`, so a report from another regime or scoring version fails it.
+
+A `hard` section is provider-neutral and must be zero; `ranking` thresholds apply to the real
+CPU model. Do not lower a threshold after seeing post-change results without explicit owner
+authorization.
+
+Scoring semantics are versioned (`evaluator_version`, `metrics.EVALUATOR_VERSION`; recorded in
+every report). Version 2: in the lifecycle phases, forbidden text counts only inside the revised
+document's own chunks (the updated document, the deleted documents); text that legitimately occurs
+in another retrieved document is not stale. The global occurrence count remains visible per case
+(`forbidden_text_hits_any_document`) and in the report (`forbidden_text_any_document`).
 
 ## Running
 
@@ -51,15 +66,16 @@ python -m slimx_rag.eval.qualification --provider hash --out /tmp/cq-hash
 HF_HUB_OFFLINE=1 python -m slimx_rag.eval.qualification --provider hf --out /tmp/cq-hf \
   --gate examples/controlroom_qualification/quality-gate.json
 
-# ControlRoom's title convention (every document titled by its upload filename); same gate,
-# gold and corpus. The official gate regime is `--title-mode benchmark` (the default) until the
-# owner authorizes a change of benchmark inputs.
+# ControlRoom's title convention (every document titled by its upload filename); same gold and
+# corpus, the second mandatory gate.
 HF_HUB_OFFLINE=1 python -m slimx_rag.eval.qualification --provider hf --title-mode filename \
-  --out /tmp/cq-hf-filename --gate examples/controlroom_qualification/quality-gate.json
+  --out /tmp/cq-hf-filename --gate examples/controlroom_qualification/quality-gate-filename.json
 ```
 
 `--hf-revision` defaults to the image's pinned model commit (`c9745ed1…`) and is recorded in the
-report as `hf_revision`; `--title-mode` is recorded as `title_mode`.
+report as `hf_revision`; `--title-mode` is recorded as `title_mode`, the scoring version as
+`evaluator_version`. `gate-result.json` names the gate file, dataset, evaluator and regime it
+was evaluated for.
 
 Outputs: `report.json` (everything, per case), `report.md` (summary, by-tag table,
 failing cases), `gate-result.{json,md}` when a gate is supplied (exit code 1 on failure).
