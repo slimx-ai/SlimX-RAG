@@ -535,3 +535,23 @@ image's pinned revision; the host benchmark runs recorded before this section re
 `refs/main` `1110a243` (weights, tokenizer and configs byte-identical; only the README differs), and
 a pinned rerun reproduced identical metrics.
 
+## 12. Same-model review 3 (Claude, 2026-09-26) of `eb365f7b..1f0cd413` and the corrections it required
+
+Again NOT independent (the Codex review of this range remains required). The reviewer reproduced
+ruff/mypy clean, 300 tests, GATE PASS 26/26 in benchmark mode with `hf_revision` c9745ed1 recorded,
+the three filename-mode failures exactly as stated, and the offline admin-embedding fix in the image.
+It confirmed RAG-AUD-039..044 and 046..048 corrected and returned B for the following residuals:
+
+| Id | Sev | Finding | Disposition |
+| --- | --- | --- | --- |
+| RAG-AUD-050 | Low | The changelog, the shaping comment and docs/index-signature.md described a `Name: <filename words>` prefix line that the code never adds (it was measured and rejected); `humanized_filename` was dead code. | Corrected: the three sentences state the truth; the helper is deleted. |
+| RAG-AUD-051 | Low | Version-like titles (`GLM-5.1`, `K2.6`, `v1.2`) matched the filename pattern, so their stems (`glm-5`, `k2`) became exact identities and a `GLM-5.1` document could outrank a `GLM-5` document for "GLM-5". | Corrected: only titles with a known document or code extension count as filenames; tested. |
+| RAG-AUD-052 | Low | Persisting the revision on every admin change (from RAG-AUD-040) let a stale pinned revision on the volume strand a later image baked at another commit (`/ready` 503, admin 422). | Corrected: the revision is persisted only when the request supplied `hf_revision`; otherwise the image's `RAG_HF_REVISION` governs; recovery (delete `embed_override.json`) documented in the README; tested. |
+| RAG-AUD-053 | Low | `hf_revision` accepted mutable refs such as `main`. | Corrected: the request field and `EmbedSettings.validate` require an exact 40-hex commit for the hf provider; tested. |
+| RAG-AUD-054 | Low | The UTF-8 replacement ratio was measured against the whole text, so a long English cp1252 note with sparse accents decoded to mojibake. | Corrected: the ratio is measured against the non-ASCII bytes; a sparse-cp1252 test added. |
+| RAG-AUD-055 | Info | A tautological assertion in a test; the admin-revision test uses the hash provider (the hf preflight was verified in the image); an acronym filename boosts every chunk of its file, consistent with human titles and unmeasured. | The assertion is fixed; the rest recorded. |
+
+Still for the owner (unchanged): RAG-AUD-045 (stale-text metric semantics) and whether ControlRoom's
+filename regime becomes the official gate regime (under it, top-1 source is 42 of 46 = 0.913 against
+0.93, the deciding case being file-014's fused tie).
+

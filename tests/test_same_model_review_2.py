@@ -61,13 +61,15 @@ def test_filename_title_keeps_the_documents_own_title_in_the_identity() -> None:
     assert "Title: Incident Report IR-2026-031" in chunk.embedding_text
     assert "Name:" not in chunk.embedding_text  # filename words are identity tokens, not prose
     assert chunk.own_title == "Incident Report IR-2026-031"
-    assert chunk.display_text.startswith("Summary") or "Summary" in chunk.display_text
+    assert "Summary" in chunk.display_text and "Document:" not in chunk.display_text
     # A human title (the benchmark's regime) adds no Title/Name lines: nothing changes there.
     human = parse_document(
         DocumentSource(document_id="inc2", filename="x.md", mime_type="text/markdown", content=_INCIDENT_MD)
     )
     assert human.title == "Incident Report IR-2026-031" and human.own_title is None
     assert looks_like_filename("atlas-incident-2026-03-14.docx") and not looks_like_filename("Incident Report")
+    # Version-like titles are not filenames: their stems must never become exact identities.
+    assert not looks_like_filename("GLM-5.1") and not looks_like_filename("K2.6") and not looks_like_filename("v1.2")
     assert filename_words("atlas-safety-manual.pdf") == ["atlas", "safety", "manual"]
     from slimx_rag.retrieval.tokenize import filename_identity_tokens
 
@@ -112,7 +114,7 @@ def test_admin_embedding_change_keeps_the_pinned_revision(client: TestClient, mo
     res = client.post("/api/admin/embedding", json={"device": "cpu"})
     assert res.status_code == 200, res.text
     override = json.loads(server._embed_override_path().read_text("utf-8"))
-    assert override["revision"] == "c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+    assert "revision" not in override  # the image's RAG_HF_REVISION keeps governing
     assert override["document_prefix"] == "passage: "
     settings = server._embed_settings()
     assert settings.revision == "c9745ed1d9f207416be6d2e6f8de32d1f16199bf" and settings.device == "cpu"
@@ -120,6 +122,10 @@ def test_admin_embedding_change_keeps_the_pinned_revision(client: TestClient, mo
     # Changing the model on a revision-pinned deployment requires the new model's revision.
     res = client.post("/api/admin/embedding", json={"provider": "hf", "hf_model": "org/other-model"})
     assert res.status_code == 422 and "hf_revision" in res.text
+    # Mutable refs are rejected at the request boundary; a revision is persisted only when supplied.
+    res = client.post("/api/admin/embedding", json={"hf_revision": "main"})
+    assert res.status_code == 422
+    assert "revision" not in json.loads(server._embed_override_path().read_text("utf-8"))
 
 
 # --- RAG-AUD-042: a chunk without workspace metadata never matches the literal "None" -----------
@@ -184,8 +190,7 @@ def test_text_document_entry_is_its_own_first_line_under_a_filename_title() -> N
         filename="atlas-maintenance-log.txt",
         mime_type="text/plain",
         content=(
-            b"Atlas Maintenance Log\n\nLAST SERVICE\n2026-04-01\n\nTECHNICIAN\nJonas Berg\n\n"
-            b"NOTES\nReplaced CC-88.\n"
+            b"Atlas Maintenance Log\n\nLAST SERVICE\n2026-04-01\n\nTECHNICIAN\nJonas Berg\n\nNOTES\nReplaced CC-88.\n"
         ),
         metadata={"title": "atlas-maintenance-log.txt"},
     )
@@ -196,3 +201,24 @@ def test_text_document_entry_is_its_own_first_line_under_a_filename_title() -> N
     assert "Entry: Atlas Maintenance Log" in units[0].embedding_text
     assert "Title:" not in units[0].embedding_text  # the own title already is the entry
     assert units[0].source_title == "atlas-maintenance-log.txt"
+
+
+def test_sparse_legacy_accents_still_decode_as_cp1252() -> None:
+    # A long English cp1252 note with a few accented characters: the accents must survive.
+    note = (
+        "Operating notes for the line. " * 90
+    ) + "Range 20\u201325 \u00b0C, filter 5 \u00b5m, contact Jos\u00e9 M\u00fcller."
+    decoded = decode_text(note.encode("cp1252"))
+    assert "20\u201325 \u00b0C" in decoded and "Jos\u00e9 M\u00fcller" in decoded and "\ufffd" not in decoded
+
+
+def test_supplied_revision_is_persisted_and_env_revision_is_not(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RAG_HF_REVISION", "c9745ed1d9f207416be6d2e6f8de32d1f16199bf")
+    server._reset_index_cache()
+    res = client.post("/api/admin/embedding", json={"hf_revision": "0123456789abcdef0123456789abcdef01234567"})
+    assert res.status_code == 200, res.text
+    override = json.loads(server._embed_override_path().read_text("utf-8"))
+    assert override["revision"] == "0123456789abcdef0123456789abcdef01234567"
+    assert server._embed_settings().revision == "0123456789abcdef0123456789abcdef01234567"

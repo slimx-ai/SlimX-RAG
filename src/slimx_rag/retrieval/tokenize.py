@@ -29,24 +29,52 @@ _TEMPORAL = {
 }
 
 
-# A caller title that is an upload filename (``atlas-incident-2026-03-14.docx``): one lexical
-# token, so its words must be surfaced separately for identity matching and the identity prefix.
-_FILENAME_RE = re.compile(r"^[^\s/\\]+\.[A-Za-z0-9]{1,5}$")
+# A caller title that is an upload filename (``atlas-incident-2026-03-14.docx``) is one lexical
+# token, so its words are surfaced separately for exact-identifier matching. Only the extensions
+# the parsers accept count: a version-like title such as ``GLM-5.1`` or ``K2.6`` is not a filename
+# and must not contribute its stem (``glm-5``) as an exact identity.
+_FILENAME_EXTENSIONS = frozenset(
+    {
+        "pdf",
+        "docx",
+        "md",
+        "markdown",
+        "txt",
+        "text",
+        "rst",
+        "csv",
+        "json",
+        "yaml",
+        "yml",
+        "html",
+        "htm",
+        "xhtml",
+        "py",
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "go",
+        "rs",
+        "java",
+        "c",
+        "cpp",
+        "rb",
+    }
+)
+_FILENAME_RE = re.compile(r"^[^\s/\\]+\.([A-Za-z0-9]{1,8})$")
 
 
 def looks_like_filename(title: str) -> bool:
-    """True for a bare filename with an extension and no spaces."""
-    return bool(_FILENAME_RE.match((title or "").strip()))
+    """True for a bare filename with a known document/code extension and no spaces."""
+    m = _FILENAME_RE.match((title or "").strip())
+    return m is not None and m.group(1).lower() in _FILENAME_EXTENSIONS
 
 
 def filename_words(title: str) -> list[str]:
     """Lowercased words of a filename's stem (``atlas-safety-manual.pdf`` -> atlas safety manual)."""
     stem = (title or "").strip().rsplit(".", 1)[0]
     return [w.lower() for w in re.split(r"[-_.\s]+", stem) if w]
-
-
-def humanized_filename(title: str) -> str:
-    return " ".join(filename_words(title))
 
 
 def filename_identity_tokens(title: str) -> set[str]:

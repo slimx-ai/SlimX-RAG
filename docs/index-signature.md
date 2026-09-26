@@ -135,8 +135,8 @@ is `index-shaping-v4` from 0.3.0: posted text is parsed and chunked by the struc
 identity prefix), heading-only parents emit no chunk, and a heading-less fact sheet that fits the
 budget is addressed by its fields (one unit per labelled field plus one for the remaining
 elements, each displaying the whole sheet, sharing one parent and cited by its label), every unit of
-such a sheet shares one parent, and the identity prefix keeps the document's own title and the
-words of a filename title, so indexes shaped by v1, v2 or v3 report `index_signature_mismatch` and
+such a sheet shares one parent, and the identity prefix keeps the document's own title beside a
+caller title (a filename title's words feed only exact-identifier matching), so indexes shaped by v1, v2 or v3 report `index_signature_mismatch` and
 must be rebuilt.
 
 ## Reset behavior

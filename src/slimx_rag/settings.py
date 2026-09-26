@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,9 +69,7 @@ class StructuredChunkSettings:
         if self.max_tokens < self.target_tokens:
             raise ValueError("structured_chunk.max_tokens must be >= target_tokens")
         if not 0 <= self.force_split_overlap_tokens < self.target_tokens:
-            raise ValueError(
-                "structured_chunk.force_split_overlap_tokens must be in [0, target_tokens)"
-            )
+            raise ValueError("structured_chunk.force_split_overlap_tokens must be in [0, target_tokens)")
         if self.fallback not in {"recursive", "none"}:
             raise ValueError("structured_chunk.fallback must be 'recursive' or 'none'")
 
@@ -140,6 +139,10 @@ class EmbedSettings:
             raise ValueError("embed.device must be a non-empty device string when set")
         if self.revision is not None and not self.revision.strip():
             raise ValueError("embed.revision must be a non-empty string when set")
+        if self.provider == "hf" and self.revision is not None and not re.fullmatch(r"[0-9a-f]{40}", self.revision):
+            raise ValueError(
+                "embed.revision must be an exact 40-hex Hugging Face commit (mutable refs such as 'main' are rejected)"
+            )
         if self.batch_size <= 0:
             raise ValueError("embed.batch_size must be > 0")
         if self.retries < 1:
@@ -180,7 +183,6 @@ class IndexSettings:
 
 @dataclass(frozen=True, slots=True)
 class IndexingPipelineSettings:
-
     kb_dir: Path = Path("knowledge-base")
     out_dir: Path = Path("output")
 
@@ -224,10 +226,9 @@ class IndexingPipelineSettings:
         # context checks (belong here)
         if not self.kb_dir.exists() or not self.kb_dir.is_dir():
             raise ValueError(f"kb_dir must exist and be a directory: {self.kb_dir}")
-        
+
         if self.out_dir.exists() and not self.out_dir.is_dir():
             raise ValueError(f"out_dir must be a directory: {self.out_dir}")
-
 
         # optional: filename sanity
         for name in (self.docs_filename, self.chunks_filename, self.index_filename):

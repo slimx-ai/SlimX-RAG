@@ -224,7 +224,7 @@ def detect_source_type(filename: str, mime_type: str | None) -> str:
 _TEXT_CONTROL_OK = {"\t", "\n", "\r", "\x0c"}
 
 
-_UTF8_REPLACEMENT_RATIO = 0.005  # up to 0.5 % stray bytes: still a UTF-8 document
+_UTF8_REPLACEMENT_RATIO = 0.05  # <= 5 % of the NON-ASCII bytes invalid: still a UTF-8 document
 
 
 def _control_ratio(text: str) -> float:
@@ -247,8 +247,12 @@ def decode_text(content: bytes) -> str:
         pass
     # UTF-8 with a few stray bytes stays UTF-8 (each bad byte becomes U+FFFD); only text with
     # many invalid sequences is legacy-encoded and falls back to cp1252 / Latin-1.
+    # Measured against the non-ASCII bytes, not the whole text: legacy cp1252 prose is almost
+    # entirely invalid among its accented bytes even when they are sparse in a long English note,
+    # while UTF-8 with a stray byte is almost entirely valid.
     replaced = content.decode("utf-8", errors="replace")
-    if replaced and replaced.count("\ufffd") / len(replaced) <= _UTF8_REPLACEMENT_RATIO:
+    non_ascii = sum(1 for b in content if b >= 0x80)
+    if replaced and non_ascii and replaced.count("\ufffd") / non_ascii <= _UTF8_REPLACEMENT_RATIO:
         return replaced.lstrip("\ufeff")
     try:
         return content.decode("cp1252")

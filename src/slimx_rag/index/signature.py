@@ -50,8 +50,8 @@ BACKEND_NAMESPACE_VERSION = "backend-namespace-v1"
 # field plus one for the remaining elements, each displaying the whole sheet, sharing one parent
 # and cited by its label). index-shaping-v4 (0.3.0, same release): every unit of a field-
 # addressed sheet shares one parent and skips its own title line, and the identity prefix keeps
-# the document's own title and the words of a filename title. Indexes shaped by v1..v3 must be
-# rebuilt.
+# the document's own title beside a caller title (the words of a filename title feed only the
+# exact-identifier identity, not the prefix). Indexes shaped by v1..v3 must be rebuilt.
 INDEX_SHAPING_VERSION = "index-shaping-v4"
 ENGINE_NAME = "slimx-rag"
 INDEX_INSTANCE_ID_FILENAME = "index_instance_id"

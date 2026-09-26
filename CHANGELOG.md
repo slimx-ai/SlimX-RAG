@@ -49,9 +49,10 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
 
 - Retrieval identity keeps the document's own title next to a caller title that is an upload
   filename (ControlRoom's convention, `title = filename`): the identity prefix gains
-  `Title: <own title>` (Markdown H1, DOCX title, a text file's first line) and
-  `Name: <filename words>`, and exact-identifier matching sees the own title, the filename's
-  words, its stem and the full name. Before this, a filename title erased the heading identity
+  `Title: <own title>` (Markdown H1, DOCX title, a text file's first line), and exact-identifier
+  matching sees the own title plus the filename's alphabetic words, stem and full name (a
+  `Name:` prefix line was measured and rejected; only titles with a known document or code
+  extension count as filenames). Before this, a filename title erased the heading identity
   ("Incident Report IR-2026-031" became `atlas-incident-2026-03-14.docx`) and the frozen gate held
   only under the benchmark's human titles (RAG-AUD-039). `index-shaping-v4`; older indexes rebuild.
 - `POST /api/admin/embedding` keeps the pinned model revision and the query/document prefixes
@@ -74,6 +75,12 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
   in the report; earlier reports recorded the cache's `refs/main`) and `--title-mode
   benchmark|filename` (ControlRoom's title convention as a second regime; gate, gold and corpus
   unchanged) (RAG-AUD-044).
+- Same-model review 3 residuals (RAG-AUD-050..054): only titles with a known document or code
+  extension count as filenames (a version-like `GLM-5.1` never contributes `glm-5` as an exact
+  identity); `hf_revision` and `RAG_HF_REVISION` must be exact 40-hex commits; the admin route
+  persists a revision only when the request supplied one, so the image's `RAG_HF_REVISION`
+  governs otherwise (recovery from a stale persisted revision: delete `embed_override.json`); the
+  UTF-8 stray-byte ratio is measured against the non-ASCII bytes so sparse legacy accents survive.
 - Known limitation, documented: BM25 document-frequency statistics span every workspace, so
   another tenant's text moves in-scope lexical scores and a scoped caller can infer term frequency
   across tenants; candidates and text never cross (RAG-AUD-043).

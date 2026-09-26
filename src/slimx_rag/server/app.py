@@ -125,30 +125,32 @@ def _embed_settings() -> EmbedSettings:
             override["query_prefix"] if "query_prefix" in override else os.getenv("RAG_EMBED_QUERY_PREFIX", "")
         ),
         document_prefix=str(
-            override["document_prefix"]
-            if "document_prefix" in override
-            else os.getenv("RAG_EMBED_DOCUMENT_PREFIX", "")
+            override["document_prefix"] if "document_prefix" in override else os.getenv("RAG_EMBED_DOCUMENT_PREFIX", "")
         ),
     )
 
 
-def _write_embed_override(settings: EmbedSettings) -> None:
+def _write_embed_override(settings: EmbedSettings, *, persist_revision: bool = False) -> None:
+    """Persist the runtime embedding choice.
+
+    The model revision is persisted only when the request supplied one: otherwise the image's
+    ``RAG_HF_REVISION`` keeps governing, so a later image baked at another commit is not stranded
+    by a stale pinned revision on the volume. Recovery from a stale persisted revision: delete
+    ``embed_override.json`` next to the index (documented in the README).
+    """
     path = _embed_override_path()
-    _atomic_write_text(
-        path,
-        json.dumps(
-            {
-                "provider": settings.provider,
-                "model": settings.model,
-                "hf_model": settings.hf_model,
-                "dim": settings.dim,
-                "device": settings.device,
-                "revision": settings.revision,
-                "query_prefix": settings.query_prefix,
-                "document_prefix": settings.document_prefix,
-            }
-        ),
-    )
+    payload: dict[str, Any] = {
+        "provider": settings.provider,
+        "model": settings.model,
+        "hf_model": settings.hf_model,
+        "dim": settings.dim,
+        "device": settings.device,
+        "query_prefix": settings.query_prefix,
+        "document_prefix": settings.document_prefix,
+    }
+    if persist_revision and settings.revision:
+        payload["revision"] = settings.revision
+    _atomic_write_text(path, json.dumps(payload))
 
 
 class UnsupportedIndexResetError(RuntimeError):
@@ -173,6 +175,7 @@ def _reset_index(
     lease: IndexInstanceLease,
     new_embed_settings: EmbedSettings,
     persist_embed_override: bool,
+    persist_revision: bool = False,
 ) -> str:
     """Transactionally stage the active local corpus and publish a fresh identity.
 
@@ -209,7 +212,7 @@ def _reset_index(
             _stage_reset_artifact(path, backup)
             staged.append((path, backup))
         if persist_embed_override:
-            _write_embed_override(new_embed_settings)
+            _write_embed_override(new_embed_settings, persist_revision=persist_revision)
             wrote_new_override = True
         new_instance_id = lease.publish_new()
     except Exception as exc:
@@ -769,7 +772,7 @@ class EmbeddingConfigRequest(BaseModel):
     # Exact Hugging Face commit for the hf provider. Required when ``hf_model`` changes while a
     # revision is pinned: the old model's revision must never be applied to the new model, and
     # the offline image cannot resolve an unpinned model.
-    hf_revision: str | None = Field(default=None, min_length=1, max_length=64)
+    hf_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
     dim: int | None = Field(default=None, gt=0)
     device: str | None = None
 
@@ -1164,6 +1167,7 @@ def set_embedding(payload: EmbeddingConfigRequest, authorization: str | None = H
                 lease=lease,
                 new_embed_settings=merged,
                 persist_embed_override=True,
+                persist_revision=bool(payload.hf_revision),
             )
     except IndexResetPartialFailure as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
