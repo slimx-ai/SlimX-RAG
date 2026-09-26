@@ -116,8 +116,15 @@ class EmbeddingTokenCounter:
         text = text or ""
         encode = getattr(self._tok, "encode", None)
         if callable(encode):
+            # verbose=False: measuring a whole parent before splitting legitimately exceeds the
+            # model limit; the chunker enforces the cap, so the tokenizer's warning is noise.
             try:
-                return len(encode(text))
+                return len(encode(text, verbose=False))
+            except TypeError:
+                try:
+                    return len(encode(text))
+                except Exception:  # noqa: BLE001 — fall back to the call form below
+                    pass
             except Exception:  # noqa: BLE001 — fall back to the call form below
                 pass
         try:
@@ -246,11 +253,11 @@ class HuggingFaceEmbedder(Embedder):
                 "HuggingFaceEmbedder requires optional dependency 'sentence-transformers'. "
                 "Install extras (e.g. `uv sync --extra hf`)."
             ) from e
-        kwargs: dict[str, object] = {}
-        if revision:
-            kwargs["revision"] = revision
         # device=None lets SentenceTransformers auto-select (CUDA if available, else CPU).
-        self._model = SentenceTransformer(model, device=device, **kwargs)
+        if revision:
+            self._model = SentenceTransformer(model, device=device, revision=revision)
+        else:
+            self._model = SentenceTransformer(model, device=device)
         self._normalize = normalize_embeddings
         self._query_prefix = query_prefix
         self._document_prefix = document_prefix

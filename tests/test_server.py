@@ -423,10 +423,13 @@ def test_index_ingests_and_is_retrievable(ingest_client: TestClient) -> None:
     assert body["index_signature"]["compatibility_fingerprint"]
     assert body["index_signature"]["embedding_dimension"] == 16
     assert body["document_pipeline"]["ingest_mode"] == "text"
-    assert body["document_pipeline"]["parser"] is None
+    # 0.3.0: posted text is parsed by the native text parser and chunked by the structured
+    # pipeline, so the text-mode receipt names that chunker, parser and fingerprint.
+    assert body["document_pipeline"]["chunker"] == "structured-token"
+    assert body["document_pipeline"]["parser"] == {"name": "native-text", "version": "1"}
     assert (
         body["document_pipeline"]["chunk_config_fingerprint"]
-        == body["index_signature"]["text_chunk_config_fingerprint"]
+        == body["index_signature"]["file_chunk_config_fingerprint"]
     )
     assert body["index_signature_source"] == "persisted_build"
     assert body["index_signature"]["signature_complete"] is True

@@ -69,6 +69,7 @@ def _structured_records() -> list[ChunkRecord]:
             source_title=ch.source_title,
             entry=str(ch.metadata.get("entry", "")),
             token_count=ch.token_count,
+            display_text=ch.display_text,
         )
         for ch in chunks
     ]

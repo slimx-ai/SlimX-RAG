@@ -1,6 +1,6 @@
 [project]
 name = "slimx-rag"
-version = "0.2.8"
+version = "0.3.0"
 description = "SlimX-RAG: a slim, deterministic RAG indexing pipeline (ingest -> chunk -> embed -> index)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,9 @@ doc = [
   "python-docx>=1.1",
 ]
 answer = [
+  # Exact reviewed SlimX source (the same archive ControlRoom locks); only /api/ask with a real
+  # model imports it. Never a moving branch.
+  "slimx @ https://github.com/slimx-ai/slimx/archive/e4b7ca30f9b528df477672cfa5911c69b722a556.tar.gz",
 ]
 demo = [
   "fastapi>=0.115",
@@ -41,7 +44,7 @@ faiss = [
   "faiss-cpu>=1.7.4",
 ]
 qdrant = [
-  "qdrant-client>=1.7.0",
+  "qdrant-client>=1.10.0",
 ]
 pgvector = [
   "psycopg[binary]>=3.1.0",
@@ -69,6 +72,10 @@ slimx-rag = "slimx_rag.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/slimx_rag"]
 
+[tool.hatch.metadata]
+# The `answer` extra pins SlimX to an exact reviewed source archive (a direct reference).
+allow-direct-references = true
+
 
 [build-system]
 requires = ["hatchling>=1.27.0"]
@@ -76,6 +83,18 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 package = true
+# The CPU release image is qualified with exactly these; the lock is resolved against them.
+constraint-dependencies = ["torch==2.7.1", "sentence-transformers==3.4.1"]
+
+# CPU-only torch wheels for the default (and only qualified) image. The GPU Dockerfile
+# overrides torch from the CUDA index after the locked sync; it is not part of this release.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
 
 [tool.ruff]
 line-length = 120

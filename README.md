@@ -134,6 +134,22 @@ compatibility fingerprint with `/ready`; see
 When `/ready` reports a corpus-wide signature, receipt, state, or instance mismatch,
 an operator can explicitly discard a local JSONL/FAISS corpus without pretending that the
 embedding configuration changed. Configure the canonical service token first; the legacy
+### Service settings added in 0.3.0
+
+| Variable | Effect |
+| --- | --- |
+| `RAG_REQUIRE_WORKSPACE_SCOPE=1` | `/api/retrieve` and `/api/ask` refuse requests without `workspace_id` (400 `workspace_scope_required`). Recommended for multi-tenant hosts. Known limitation: BM25 document-frequency statistics span the whole index, so another tenant's text can move in-scope lexical scores and a scoped caller can infer how common a term is across tenants; candidates and text never cross scope. |
+| `RAG_HF_REVISION` | Exact Hugging Face commit for the `hf` embedder; the published image pins it so a mutable `main` is never adopted at runtime. `POST /api/admin/embedding` keeps it (and the query/document prefixes) across a device change and requires `hf_revision` in the request when `hf_model` changes on a pinned deployment. Both must be an exact 40-hex commit; mutable refs such as `main` are rejected. A revision is persisted on the volume only when a request supplied one; if a later image cannot load that persisted revision, delete `embed_override.json` next to the index and restart so the image's `RAG_HF_REVISION` governs again. |
+| `RAG_EMBED_QUERY_PREFIX` / `RAG_EMBED_DOCUMENT_PREFIX` | Prefixes for asymmetric embedding models (part of the embedding identity). |
+| `RAG_ALLOW_MODEL_OVERRIDE=1` | Lets `/api/ask` and `/api/eval/run` honour a caller-supplied `model`; off by default (provider egress with server credentials). |
+| `RAG_EVAL_DATASET_DIR` | Directory eval datasets must live in (default `examples`). `/api/eval/run` accepts `workspace_id`/`document_ids` like `/api/retrieve`. |
+| `RAG_MAX_QUESTION_CHARS`, `RAG_MAX_TOP_K`, `RAG_MAX_SCOPE_DOCUMENT_IDS` | Request bounds (defaults 20000, 200, 10000). |
+
+`workspace_id`/`document_id` must be non-empty and must not contain `/` or control characters
+(422). Empty `workspace_id`, empty `document_ids` or empty entries are rejected instead of
+silently widening the scope, and `document_ids` always requires `workspace_id`. Binary files and HTML are rejected by `/api/index/file` with
+422 `parse_failed: UnsupportedDocumentError` so a host can fall back to its own extracted text.
+
 `DEMO_AUTH_TOKEN` is deliberately insufficient for this destructive endpoint:
 
 ```bash

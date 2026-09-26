@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Protocol, runtime_checkable
 
 from .tokenize import lexical_tokens
@@ -18,8 +18,15 @@ from .tokenize import lexical_tokens
 
 @runtime_checkable
 class LexicalIndex(Protocol):
-    def search(self, query: str, *, top_k: int) -> list[tuple[str, float]]:
-        """Return ``(chunk_id, score)`` ranked by lexical relevance, best first."""
+    def search(
+        self, query: str, *, top_k: int, allow: Callable[[str], bool] | None = None
+    ) -> list[tuple[str, float]]:
+        """Return ``(chunk_id, score)`` ranked by lexical relevance, best first.
+
+        ``allow`` filters candidates BEFORE the top-k cut, so a retrieval scoped to one
+        workspace/document set receives ``top_k`` in-scope candidates instead of a budget
+        consumed by other tenants' chunks.
+        """
         ...
 
     def __len__(self) -> int:
@@ -62,7 +69,9 @@ class Bm25Index:
         df = self._df.get(term, 0)
         return math.log(1.0 + (self._n - df + 0.5) / (df + 0.5))
 
-    def search(self, query: str, *, top_k: int) -> list[tuple[str, float]]:
+    def search(
+        self, query: str, *, top_k: int, allow: Callable[[str], bool] | None = None
+    ) -> list[tuple[str, float]]:
         if self._n == 0:
             return []
         terms = [t for t in lexical_tokens(query) if t in self._df]
@@ -83,4 +92,12 @@ class Bm25Index:
             if score > 0.0:
                 scored.append((chunk_id, score))
         scored.sort(key=lambda kv: (-kv[1], kv[0]))
-        return scored[:top_k]
+        if allow is None:
+            return scored[:top_k]
+        out: list[tuple[str, float]] = []
+        for chunk_id, score in scored:
+            if allow(chunk_id):
+                out.append((chunk_id, score))
+                if len(out) >= top_k:
+                    break
+        return out

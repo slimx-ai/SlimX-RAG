@@ -111,6 +111,11 @@ def structure_block(
         line = raw_lines[i]
         s = line.strip()
         if not s:
+            # A blank line is a paragraph boundary: keep it so ``_norm_paragraphs`` splits the
+            # buffered narrative into separate PARAGRAPH elements instead of one block that the
+            # chunker can only force-split at arbitrary word positions.
+            if pending:
+                pending.append("")
             i += 1
             continue
 
@@ -194,8 +199,14 @@ _CODE_EXTS = {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".c", 
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
+_HTML_MIMES = {"text/html", "application/xhtml+xml"}
+# Text sources are decoded as UTF-8; a NUL byte or more than this share of undecodable bytes
+# means the payload is binary (image, spreadsheet, archive, ...), not text.
+_MAX_UNDECODABLE_RATIO = 0.02
+
+
 def detect_source_type(filename: str, mime_type: str | None) -> str:
-    """Return one of: pdf | docx | markdown | code | text."""
+    """Return one of: pdf | docx | markdown | code | html | text."""
     lower = (filename or "").lower()
     if lower.endswith(".pdf") or mime_type == "application/pdf":
         return "pdf"
@@ -203,6 +214,60 @@ def detect_source_type(filename: str, mime_type: str | None) -> str:
         return "docx"
     if lower.endswith((".md", ".markdown")) or mime_type == "text/markdown":
         return "markdown"
+    if lower.endswith((".html", ".htm", ".xhtml")) or (mime_type or "").split(";")[0].strip() in _HTML_MIMES:
+        return "html"
     if any(lower.endswith(ext) for ext in _CODE_EXTS):
         return "code"
     return "text"
+
+
+_TEXT_CONTROL_OK = {"\t", "\n", "\r", "\x0c"}
+
+
+_UTF8_REPLACEMENT_RATIO = 0.05  # <= 5 % of the NON-ASCII bytes invalid: still a UTF-8 document
+
+
+def _control_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    bad = sum(1 for ch in text if (ord(ch) < 32 and ch not in _TEXT_CONTROL_OK) or ch == "\ufffd")
+    return bad / len(text)
+
+
+def decode_text(content: bytes) -> str:
+    """Decode text bytes: UTF-8 (BOM tolerated), else Windows-1252, else Latin-1.
+
+    Legacy editors still save accented prose as cp1252/Latin-1; decoding it as UTF-8 with
+    replacement would garble every accented letter (and previously made such files look
+    binary). Callers should check :func:`looks_binary` first.
+    """
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    # UTF-8 with a few stray bytes stays UTF-8 (each bad byte becomes U+FFFD); only text with
+    # many invalid sequences is legacy-encoded and falls back to cp1252 / Latin-1.
+    # Measured against the non-ASCII bytes, not the whole text: legacy cp1252 prose is almost
+    # entirely invalid among its accented bytes even when they are sparse in a long English note,
+    # while UTF-8 with a stray byte is almost entirely valid.
+    replaced = content.decode("utf-8", errors="replace")
+    non_ascii = sum(1 for b in content if b >= 0x80)
+    if replaced and non_ascii and replaced.count("\ufffd") / non_ascii <= _UTF8_REPLACEMENT_RATIO:
+        return replaced.lstrip("\ufeff")
+    try:
+        return content.decode("cp1252")
+    except UnicodeDecodeError:
+        return content.decode("latin-1")
+
+
+def looks_binary(content: bytes | str | None, *, sample_bytes: int = 65536) -> bool:
+    """True when byte content cannot be text: NUL bytes, or too many control/undecodable
+    characters under every text decoding the parsers accept (UTF-8, cp1252, Latin-1)."""
+    if not isinstance(content, bytes):
+        return False
+    sample = content[:sample_bytes]
+    if not sample:
+        return False
+    if b"\x00" in sample:
+        return True
+    return _control_ratio(decode_text(sample)) > _MAX_UNDECODABLE_RATIO

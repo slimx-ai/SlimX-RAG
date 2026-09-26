@@ -25,5 +25,4 @@ build/
 *.egg-info/
 output/
 
-# uv
-uv.lock
+# uv: uv.lock IS committed (reproducible service image); do not ignore it.

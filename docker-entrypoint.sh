@@ -15,12 +15,14 @@ out_dir=$(dirname "$RAG_INDEX_PATH")
 : "${RAG_STATE_PATH:=$out_dir/index_state.json}"
 : "${RAG_EMBED_PROVIDER:=hf}"
 : "${RAG_HF_MODEL:=sentence-transformers/all-MiniLM-L6-v2}"
+# Exact model commit baked into the image (set by the Dockerfile); empty = unpinned.
+: "${RAG_HF_REVISION:=}"
 : "${RAG_EMBED_DIM:=384}"
 # Empty = let SentenceTransformers auto-select (CUDA if the GPU image + driver are present).
 : "${RAG_EMBED_DEVICE:=}"
 : "${RAG_INDEX_BACKEND:=local}"
 : "${PORT:=8080}"
-export RAG_INDEX_PATH RAG_STATE_PATH RAG_EMBED_PROVIDER RAG_HF_MODEL RAG_EMBED_DIM RAG_EMBED_DEVICE RAG_INDEX_BACKEND
+export RAG_INDEX_PATH RAG_STATE_PATH RAG_EMBED_PROVIDER RAG_HF_MODEL RAG_HF_REVISION RAG_EMBED_DIM RAG_EMBED_DEVICE RAG_INDEX_BACKEND
 
 build_index() {
   set -- slimx-rag run \
@@ -34,6 +36,9 @@ build_index() {
     --index-backend "$RAG_INDEX_BACKEND"
   if [ -n "$RAG_EMBED_DEVICE" ]; then
     set -- "$@" --embed-device "$RAG_EMBED_DEVICE"
+  fi
+  if [ -n "$RAG_HF_REVISION" ]; then
+    set -- "$@" --hf-revision "$RAG_HF_REVISION"
   fi
   if [ -n "${RAG_REINDEX:-}" ]; then
     set -- "$@" --reindex

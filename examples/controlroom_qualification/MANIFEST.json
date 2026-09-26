@@ -1,0 +1,39 @@
+{
+  "dataset_version": "cq-2026-09-25.1",
+  "deleted": [
+    "atlas-obsolete-spec"
+  ],
+  "document_count": 28,
+  "files": {
+    "#update:atlas-maintenance-log": "00f16638203833e34b87f106c12d25e01502e601d1334131eaca157634ea8637",
+    "alpha/atlas/atlas-calibration-procedure.pdf": "4445f747801fb7fa8bd1f1610e1379e60ce738ed06e501d7ef3e76baca5f5f82",
+    "alpha/atlas/atlas-cell4-cover.md": "034646eee660dd9e1b3e3dd35714e9920e51790835a48cf6a2608a2a2ffea428",
+    "alpha/atlas/atlas-cell9-cover.md": "36aadba113af44d3d62ff8ec38fc098c16425748c7a62ae077e7b9c1b411bed6",
+    "alpha/atlas/atlas-faq.md": "ff6abfd9a5301085ab573f5ef1ae96a542b6a1ee6c257fc499811459662a956c",
+    "alpha/atlas/atlas-firmware-notes.txt": "06f0d0e5dfe4f2ddcff7b030101f1e756bc8af2a839940e0c59b568f9b2bb048",
+    "alpha/atlas/atlas-glossary.md": "abba0be92bbaeb5ad4736b8f1212f3e9fc0dfcd7270be10c3512f660ac364c92",
+    "alpha/atlas/atlas-incident-2026-03-14.docx": "20fc1543e894856e31a424e96cff30f5cda4506a41c5f3aada97fd52659fcc49",
+    "alpha/atlas/atlas-incident-2026-05-02.docx": "6f8851741c25cb12071d13a800d6f641d3efadd0b14d1879efb0e38848541ba3",
+    "alpha/atlas/atlas-maintenance-log.txt": "d67e8fea7b7ce407381947b549b251c173f4af0a4967366e7cfdd9123f702507",
+    "alpha/atlas/atlas-meeting-notes-w12.md": "7545ba99b52129462151b1273de5c350acb2ff782f54c5901dfdf907187c0bfd",
+    "alpha/atlas/atlas-obsolete-spec.md": "27fe4271774f3dcaf1a08968bd6c20c1e2d8e3d3d91eeb8fd83de970bd9d1e0d",
+    "alpha/atlas/atlas-parts-catalog.md": "3f4df21ce8c02826d77dca56eb79a29f9dea6d7f98b116b5c07a9e61ae24dd86",
+    "alpha/atlas/atlas-release-timeline.md": "28d59cc03ebadc302a674ea2e26d80d6faabd4d7eee99a23c5ab7e0e5f5754c9",
+    "alpha/atlas/atlas-safety-manual.pdf": "65154598372e2f29baaa95ef49114051fc98424c2f0309138d044b57a141b4a4",
+    "alpha/atlas/atlas-shift-handover.txt": "edb868a337fe6432cab97823256c8faeaa98e854903bac9f409fd0d8667b7afa",
+    "alpha/atlas/atlas-vendor-contract.md": "092bd600a5bd9d39433ffa862451197d4bd39198853a0760a93f0e8456c951c3",
+    "alpha/atlas/atlas_controller.py": "cc5d4865ff2034e48b56cbbd4a31e7441be13b18399643a283144da30ef473ca",
+    "alpha/atlas/updates/atlas-maintenance-log.txt": "00f16638203833e34b87f106c12d25e01502e601d1334131eaca157634ea8637",
+    "alpha/borealis/borealis-conveyor-spec.pdf": "2eaa3e968257cf173bf8dc56db8a73ad5d5c700216f93fa66fb87dcbf2501d30",
+    "alpha/borealis/borealis-glossary.md": "194f708da9b04230cb5fd2aa8be1fe8fe336248afcbcd8738364f1103156dfaf",
+    "alpha/borealis/borealis-incident.docx": "7f074f0cc8b78c1d95be16f69582ba1952c6db4049aab9e8e858b5a6cf918629",
+    "alpha/borealis/borealis-notes.txt": "ea637d3eda47d647321e49a2bdb9e43dbdb618a4d8a3213dba21adfa6207904e",
+    "alpha/borealis/borealis-parts.md": "6be89178b88306db076b4683e5fdf231caadbd47bcf8846d4c48e433fb8b9456",
+    "alpha/borealis/borealis-timeline.md": "65c6d8b4cd0dab71d9b631440f654284685c3ecb2ac07942b02dadba71877697",
+    "beta/cascade/cascade-glossary.md": "0fd55881923cd5f487e7114e7f7c890b2d95e85dcd519189caf322e1b5d6beee",
+    "beta/cascade/cascade-incident.docx": "923f4d1798f49cbbaba87fc933987a089c1c99d2b476b4a5d9afa45505658d85",
+    "beta/cascade/cascade-notes.txt": "8aa003f44aad5ecc3ef565c98b5a89d99293f2d0b723e463e5f47724c26d4096",
+    "beta/cascade/cascade-parts.md": "af3ed5d378529c1e30504a3767f5f338f9ff2a9d16c1de081d69d802bab498bf",
+    "beta/cascade/cascade-press-spec.pdf": "cd543748510729b2c18dca9efd9c807b6f0b6587b26fb9348636c9a761f4ce23"
+  }
+}

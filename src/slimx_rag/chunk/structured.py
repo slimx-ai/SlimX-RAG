@@ -3,7 +3,14 @@
 Replaces blind character windows with structure-aware chunks:
 
 - Parents are PDF pages (or sections, split at heading/title boundaries). A small,
-  coherent fact-sheet page stays a single self-contained chunk.
+  coherent fact sheet under a heading stays a single self-contained chunk.
+- A heading-less fact sheet (a title line plus at least two labelled fields and no heading of
+  its own) that fits the budget with its longest label prefix is addressed by its fields: one
+  retrieval unit per field, embedded as the identity prefix plus that field alone, because one
+  mean-pooled vector over several unrelated fields answers a question about any one of them
+  poorly. The remaining elements (minus the sheet's own title line) form one more unit. Every
+  unit displays the whole sheet, shares one retrieval parent and is cited by its field label,
+  the only locator such a sheet has (a heading-less PDF fact page is cited by page and label).
 - Children are created only when a parent exceeds the embedding-safe token cap, by
   packing WHOLE elements (a field's label+value is never split; tables stay isolated).
 - Normal chunks use no sliding overlap; a small token overlap is used ONLY when an
@@ -45,11 +52,21 @@ class _Parent:
     page_number: int | None
     page_type: PageType
     elements: tuple[ParsedElement, ...]
+    inferred_title: str | None = None
 
 
 def _iter_parents(doc: ParsedDocument) -> Iterator[_Parent]:
-    """Yield parent units: each page, subdivided at heading/title boundaries."""
+    """Yield parent units: each page, subdivided at heading/title boundaries.
+
+    A group made only of heading/title elements (a document title followed directly by its
+    first section heading) carries no content of its own: its text already lives in the
+    children's ``section_path`` and the document title. Emitting it as a chunk gave a
+    content-less passage that won exact-identifier boosts, so it is skipped whenever the
+    document has any body element. Group ordinals are preserved so sibling parent ids do not
+    shift.
+    """
     paginated = doc.page_count is not None
+    has_body = any(el.element_type not in _HEADING_TYPES for page in doc.pages for el in page.elements)
     for page in doc.pages:
         groups: list[list[ParsedElement]] = []
         current: list[ParsedElement] = []
@@ -61,6 +78,8 @@ def _iter_parents(doc: ParsedDocument) -> Iterator[_Parent]:
         if current:
             groups.append(current)
         for gi, group in enumerate(groups):
+            if has_body and all(e.element_type in _HEADING_TYPES for e in group):
+                continue
             head = next((e for e in group if e.element_type in _HEADING_TYPES), None)
             title = (head.text if head else None) or page.title or doc.title
             section = (head.text if head else None) or page.title
@@ -72,18 +91,54 @@ def _iter_parents(doc: ParsedDocument) -> Iterator[_Parent]:
                 page_number=page.page_number if paginated else None,
                 page_type=page.page_type,
                 elements=tuple(group),
+                inferred_title=page.inferred_title,
             )
 
 
-def _identity_prefix(*, source_title: str, page_number: int | None, entry: str | None, section: str | None) -> str:
+def _identity_prefix(
+    *,
+    source_title: str,
+    page_number: int | None,
+    entry: str | None,
+    section: str | None,
+    section_path: tuple[str, ...] = (),
+    own_title: str | None = None,
+) -> str:
     lines = [f"Document: {source_title}"]
+    # ControlRoom sends the upload filename as the title. Keep the document's own title (its
+    # heading, DOCX title or first line) in the identity so an identifier in that heading still
+    # matches; the filename's words are NOT spelled out here (measured: they put the shared
+    # prefix of every upload, e.g. "atlas", into each tiny unit and displaced the right one).
+    if own_title and own_title != source_title and own_title != entry:
+        lines.append(f"Title: {own_title}")
     if page_number is not None:
         lines.append(f"Page: {page_number}")
     if entry:
         lines.append(f"Entry: {entry}")
     if section and section != entry:
         lines.append(f"Section: {section}")
+    # Ancestor headings (a heading-only parent emits no chunk of its own, so an identifier
+    # that lives only in such a heading must survive in its descendants' identity).
+    ancestors = [h for h in section_path[:-1] if h and h != source_title]
+    if ancestors:
+        lines.append("Path: " + " > ".join(ancestors))
     return "\n".join(lines)
+
+
+def _is_field_addressed(parent: _Parent) -> bool:
+    """True for a heading-less fact sheet with at least two labelled fields.
+
+    Its field labels are the only locators it has, and a single embedding of the packed sheet
+    is diluted by the fields unrelated to a question about one of them (measured: the
+    ControlRoom qualification's maintenance-log question scored 0.48 against the packed sheet
+    and 0.62 against its matching field alone).
+    """
+    if parent.page_type != PageType.FACT_SHEET:
+        return False
+    if any(el.element_type in _HEADING_TYPES for el in parent.elements):
+        return False
+    labelled = [el for el in parent.elements if el.element_type == ElementType.FIELD and el.metadata.get("label")]
+    return len(labelled) >= 2
 
 
 def _child_section(parent: _Parent, els: list[ParsedElement]) -> str | None:
@@ -182,6 +237,8 @@ def _chunk_parent(
             page_number=parent.page_number,
             entry=parent.title,
             section=section,
+            section_path=parent.section_path,
+            own_title=doc.own_title,
         )
 
     # Budget so prefix + content never exceeds the hard cap. The whole-parent check uses
@@ -199,15 +256,17 @@ def _chunk_parent(
 
     chunks: list[RetrievalChunk] = []
     ordinal = 0
+    field_addressed = False  # set before the field units of a heading-less fact sheet are emitted
 
-    def emit(display_text: str, els: list[ParsedElement], *, forced: bool) -> None:
+    def emit(display_text: str, els: list[ParsedElement], *, forced: bool, embedding_body: str | None = None) -> None:
         nonlocal ordinal
         display_text = display_text.strip()
         if not display_text:
             return
         section = _child_section(parent, els)
         prefix = prefix_for(section)
-        embedding_text = f"{prefix}\n\n{display_text}" if prefix else display_text
+        body = display_text if embedding_body is None else embedding_body.strip()
+        embedding_text = f"{prefix}\n\n{body}" if prefix else body
         chunk_id = make_chunk_id(
             parent_id=parent.parent_id,
             content_hash_value=content_hash(embedding_text),
@@ -228,6 +287,7 @@ def _chunk_parent(
                 page_type=parent.page_type,
                 element_types=tuple(e.element_type for e in els),
                 source_title=doc.title,
+                own_title=doc.own_title,
                 ordinal=ordinal,
                 forced_split=forced,
                 metadata={
@@ -235,6 +295,8 @@ def _chunk_parent(
                     "parser_version": doc.parser_version,
                     "entry": parent.title,
                     "page_type": parent.page_type.value,
+                    # Every unit of a field-addressed sheet shares one retrieval parent.
+                    "field_addressed": field_addressed,
                 },
             )
         )
@@ -244,9 +306,25 @@ def _chunk_parent(
     if not parent_text:
         return chunks
 
-    # Whole parent fits the embedding-safe budget -> one self-contained chunk.
-    if counter.count(parent_text) <= whole_parent_budget:
-        emit(parent_text, list(parent.elements), forced=False)
+    # Whole parent fits the embedding-safe budget -> one self-contained chunk, unless it is a
+    # heading-less fact sheet that also fits with its LONGEST label prefix (every unit is cited
+    # by a label): then one unit per field, each displaying the whole sheet, plus one unit for
+    # the remaining elements minus the sheet's own title line.
+    parent_tokens = counter.count(parent_text)
+    if parent_tokens <= whole_parent_budget:
+        if _is_field_addressed(parent) and parent_tokens <= content_budget:
+            field_addressed = True
+            title_lines = {t for t in (parent.inferred_title, parent.title) if t}
+            rest: list[ParsedElement] = []
+            for el in parent.elements:
+                if el.element_type == ElementType.FIELD and el.metadata.get("label"):
+                    emit(parent_text, [el], forced=False, embedding_body=el.text)
+                elif el.text.strip() not in title_lines:
+                    rest.append(el)
+            if rest:
+                emit(parent_text, rest, forced=False, embedding_body="\n".join(e.text for e in rest))
+        else:
+            emit(parent_text, list(parent.elements), forced=False)
         return chunks
 
     # Otherwise pack WHOLE elements (no overlap), isolating tables and force-splitting any

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from ..model import DocumentSource, ElementType, PageType, ParsedDocument, ParsedElement, ParsedPage
-from ..structure import detect_source_type
+from ..structure import decode_text, detect_source_type, looks_binary
 
 PARSER_NAME = "native-markdown"
 PARSER_VERSION = "1"
@@ -20,7 +20,7 @@ def _as_text(source: DocumentSource) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, bytes):
-        return content.decode("utf-8", errors="replace")
+        return decode_text(content)
     return ""
 
 
@@ -29,7 +29,7 @@ class MarkdownParser:
     version = PARSER_VERSION
 
     def supports(self, source: DocumentSource) -> bool:
-        return detect_source_type(source.filename, source.mime_type) == "markdown"
+        return detect_source_type(source.filename, source.mime_type) == "markdown" and not looks_binary(source.content)
 
     def parse(self, source: DocumentSource) -> ParsedDocument:
         text = _as_text(source)
@@ -117,17 +117,18 @@ class MarkdownParser:
 
         flush_para()
 
-        title = doc_title or str(source.metadata.get("title") or "") or _stem(source.filename)
+        title = str(source.metadata.get("title") or "") or doc_title or _stem(source.filename)
         page = ParsedPage(
             page_number=1,
             elements=tuple(elements),
-            title=title,
+            title=doc_title or title,
             page_type=PageType.NARRATIVE,
             text=text,
         )
         return ParsedDocument(
             document_id=doc_id,
             title=title,
+            own_title=doc_title if doc_title and doc_title != title else None,
             source_type="markdown",
             parser_name=self.name,
             parser_version=self.version,

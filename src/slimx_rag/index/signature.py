@@ -43,7 +43,16 @@ INDEX_SIGNATURE_VERSION = "index-signature-v1"
 EMBEDDING_CONFIG_VERSION = "embedding-config-v1"
 PARSER_CONFIG_VERSION = "parser-registry-v1"
 BACKEND_NAMESPACE_VERSION = "backend-namespace-v1"
-INDEX_SHAPING_VERSION = "index-shaping-v1"
+# index-shaping-v2 (0.3.0): posted text is parsed and chunked by the structured pipeline (every
+# chunk carries parent identity, page_type, section and display_text and embeds the identity
+# prefix); heading-only parents emit no chunk. index-shaping-v3 (0.3.0, same release): a
+# heading-less fact sheet that fits the budget is addressed by its fields (one unit per labelled
+# field plus one for the remaining elements, each displaying the whole sheet, sharing one parent
+# and cited by its label). index-shaping-v4 (0.3.0, same release): every unit of a field-
+# addressed sheet shares one parent and skips its own title line, and the identity prefix keeps
+# the document's own title beside a caller title (the words of a filename title feed only the
+# exact-identifier identity, not the prefix). Indexes shaped by v1..v3 must be rebuilt.
+INDEX_SHAPING_VERSION = "index-shaping-v4"
 ENGINE_NAME = "slimx-rag"
 INDEX_INSTANCE_ID_FILENAME = "index_instance_id"
 INDEX_BUILD_RECEIPT_FILENAME = "index_build_receipt.json"
