@@ -183,7 +183,10 @@ def test_text_document_entry_is_its_own_first_line_under_a_filename_title() -> N
         document_id="log",
         filename="atlas-maintenance-log.txt",
         mime_type="text/plain",
-        content=b"Atlas Maintenance Log\n\nLAST SERVICE\n2026-04-01\n\nTECHNICIAN\nJonas Berg\n\nNOTES\nReplaced CC-88.\n",
+        content=(
+            b"Atlas Maintenance Log\n\nLAST SERVICE\n2026-04-01\n\nTECHNICIAN\nJonas Berg\n\n"
+            b"NOTES\nReplaced CC-88.\n"
+        ),
         metadata={"title": "atlas-maintenance-log.txt"},
     )
     doc = parse_document(src)
