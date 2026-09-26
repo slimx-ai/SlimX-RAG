@@ -102,8 +102,15 @@ def _identity_prefix(
     entry: str | None,
     section: str | None,
     section_path: tuple[str, ...] = (),
+    own_title: str | None = None,
 ) -> str:
     lines = [f"Document: {source_title}"]
+    # ControlRoom sends the upload filename as the title. Keep the document's own title (its
+    # heading, DOCX title or first line) in the identity so an identifier in that heading still
+    # matches; the filename's words are NOT spelled out here (measured: they put the shared
+    # prefix of every upload, e.g. "atlas", into each tiny unit and displaced the right one).
+    if own_title and own_title != source_title and own_title != entry:
+        lines.append(f"Title: {own_title}")
     if page_number is not None:
         lines.append(f"Page: {page_number}")
     if entry:
@@ -231,6 +238,7 @@ def _chunk_parent(
             entry=parent.title,
             section=section,
             section_path=parent.section_path,
+            own_title=doc.own_title,
         )
 
     # Budget so prefix + content never exceeds the hard cap. The whole-parent check uses
@@ -279,6 +287,7 @@ def _chunk_parent(
                 page_type=parent.page_type,
                 element_types=tuple(e.element_type for e in els),
                 source_title=doc.title,
+                own_title=doc.own_title,
                 ordinal=ordinal,
                 forced_split=forced,
                 metadata={

@@ -121,13 +121,14 @@ class MarkdownParser:
         page = ParsedPage(
             page_number=1,
             elements=tuple(elements),
-            title=title,
+            title=doc_title or title,
             page_type=PageType.NARRATIVE,
             text=text,
         )
         return ParsedDocument(
             document_id=doc_id,
             title=title,
+            own_title=doc_title if doc_title and doc_title != title else None,
             source_type="markdown",
             parser_name=self.name,
             parser_version=self.version,

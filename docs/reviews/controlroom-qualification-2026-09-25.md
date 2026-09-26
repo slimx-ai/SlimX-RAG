@@ -493,3 +493,45 @@ prefers for "Atlas gantry"; the top-1 threshold is met with one case of margin (
 conf-036 remains the single documented top-1 miss. Not done on purpose: no threshold, gold,
 embedder, reranker, identity-prefix or fusion-constant change.
 
+## 11. Same-model review 2 (Claude, 2026-09-26) and the corrections it required
+
+A second same-model review of the complete range `eb365f7b..0a7bfb69` (NOT independent; the Codex
+review of the SlimX-RAG range remains required) returned B. CORRECTION REQUIRED with eleven findings.
+Every finding was re-verified by execution before correction; dispositions:
+
+| Id | Sev | Finding | Disposition |
+| --- | --- | --- | --- |
+| RAG-AUD-039 | High | The gate PASS held only under the benchmark's human titles: ControlRoom sends `title = upload filename`, and this range made the caller's title win, so a document's own heading identity ("Incident Report IR-2026-031") vanished; replayed with filename titles the gate failed 6 checks (hit@1 0.905, exact-id 0.941, top-1 0.891, locator failures 1, missing new content 2, stale/forbidden text 1). | Corrected: parsers keep the document's own title (`ParsedDocument.own_title`), the identity prefix carries `Title: <own title>` when it differs from the caller's title and the entry, a text/Markdown/DOCX document's entry title is its own title, and exact-identifier identity includes the own title plus the filename's alphabetic words, stem and full name. A `Name:` prefix line spelling out filename words was tried and rejected (it put the shared upload prefix into every tiny unit and displaced four top-1 results). The benchmark gained `--title-mode benchmark|filename`; the official regime stays `benchmark` pending owner authorization. |
+| RAG-AUD-040 | Medium | `POST /api/admin/embedding` rebuilt settings without `revision`/prefixes and did not persist them; in the offline image `{"device":"cpu"}` returned 422 `embedder_preflight_failed: OSError` (reproduced). | Corrected: `dataclasses.replace(current, …)`, persisted `revision`/prefixes, `hf_revision` accepted and required when `hf_model` changes on a pinned deployment; test with `RAG_HF_REVISION`; the image smoke probes the route offline. |
+| RAG-AUD-041 | Medium | Qdrant accepts only UUID/integer point ids; 64-hex chunk ids failed `upsert` with the real client (reproduced in `:memory:`), so RAG-AUD-038's "corrected" claim was incomplete. | Corrected: deterministic UUIDv5 point ids with the chunk id in the payload; retrieve/delete/query map both ways; test against `QdrantClient(":memory:")`; the fake enforces the id rule. |
+| RAG-AUD-042 | Medium | `str(md.get("workspace_id"))` turned a missing value into `"None"`, so `{"workspace_id":"None"}` returned unscoped chunks under `RAG_REQUIRE_WORKSPACE_SCOPE`. | Corrected in the hybrid and dense-only scope filters: missing or non-string metadata is out of scope; test. |
+| RAG-AUD-043 | Low | BM25 statistics span every workspace (lexical scores move with other tenants' text; term frequency inferable). | Documented as a known limitation (README, CHANGELOG); candidates and text never cross scope (RAG-AUD-006/031). |
+| RAG-AUD-044 | Low | The benchmark never set `RAG_HF_REVISION`, so reports recorded the cache's `refs/main` (`1110a243`, byte-identical weights) while the record claimed `c9745ed1`. | Corrected: the runner pins `DEFAULT_HF_REVISION = c9745ed1…` (recorded in the report, CLI `--hf-revision`); the earlier records are annotated below. |
+| RAG-AUD-045 | Low | `forbidden_text_hits` / `updated_doc_stale_hits` count matches in any returned document, so a legitimately different document that mentions the forbidden name ("Jonas Berg" in the March incident's attendee table) fails two hard checks. | NOT changed: a metric-semantics change to the frozen harness needs the owner's authorization (proposal: count forbidden text only in results from the updated document). |
+| RAG-AUD-046 | Low | `/api/index` had no text bound and no element cap; posting `""` for an existing document returned 200 and silently emptied it (reproduced). | Corrected: `text` bounded (`RAG_MAX_TEXT_CHARS`), blank rejected (422), element cap applied (413); test. |
+| RAG-AUD-047 | Low | `b5447ef8` and `0a7bfb69` chunk differently under one shaping version. | Corrected: `index-shaping-v4` (also covers the identity change); `b5447ef8`/`0a7bfb69` volumes rebuild. |
+| RAG-AUD-048 | Low | One stray byte made `decode_text` fall back to cp1252 for the whole file (mojibake). | Corrected: UTF-8 with replacement when stray bytes are sparse (<= 0.5 %); legacy encodings still fall back; test. |
+| RAG-AUD-049 | Info | `test_release_inputs.py` checks strings; the fidelity verifier does not check text-document label citations; determinism runs twice in one process; field units add N+1 vectors per sheet (unmeasured on larger corpora); `Dockerfile.gpu` not reviewed in depth. | Recorded; not changed in this pass. |
+
+Measurement after the corrections (frozen gate sha256 `0d506812…`, gold and corpus unchanged,
+`all-MiniLM-L6-v2@c9745ed1` pinned and recorded, top_k 8):
+
+| Regime | hit@1 | hit@5 | MRR | nDCG@8 | exact-id@1 | top-1 source | locator failures | missing new content | gate |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| benchmark titles, before (0a7bfb69) | 0.937 | 1.000 | 0.954 | 0.958 | 1.000 | 0.935 | 0 | 0 | PASS 26/26 |
+| benchmark titles, after | 0.937 | 1.000 | 0.954 | 0.958 | 1.000 | 0.935 | 0 | 0 | PASS 26/26 |
+| filename titles (ControlRoom), before (0a7bfb69) | 0.905 | 0.968 | 0.925 | 0.928 | 0.941 | 0.891 | 1 | 2 | FAIL 6 |
+| filename titles (ControlRoom), after | 0.921 | 1.000 | 0.948 | 0.954 | 1.000 | 0.913 | 0 | 0 | FAIL 3 |
+| hash provider, benchmark titles, after | 0.651 | 0.810 | 0.724 | 0.737 | 1.000 | 0.609 | 9 | 3 | PASS (17 hard) |
+
+The three remaining filename-regime failures are `updated_doc_stale_hits` and `forbidden_text_hits`
+(one case, RAG-AUD-045: the forbidden name occurs in a different, legitimately retrieved document) and
+`top1_expected_source_rate` 0.913 (three misses: conf-036, file-014's fused tie and name-017). Whether
+the filename regime becomes the official gate regime, and whether the RAG-AUD-045 metric change is
+authorized, are owner decisions; nothing in the frozen inputs was changed.
+
+Record correction (RAG-AUD-044): the "resolved `c9745ed1`" statements in §1 and §8 describe the
+image's pinned revision; the host benchmark runs recorded before this section resolved the cache's
+`refs/main` `1110a243` (weights, tokenizer and configs byte-identical; only the README differs), and
+a pinned rerun reproduced identical metrics.
+

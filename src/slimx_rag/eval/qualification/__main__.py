@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from .gate import evaluate_gate, load_gate
-from .runner import DEFAULT_HF_MODEL, run_qualification, write_report
+from .runner import DEFAULT_HF_MODEL, DEFAULT_HF_REVISION, TITLE_MODES, run_qualification, write_report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -18,12 +18,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--hf-model", default=DEFAULT_HF_MODEL)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--hf-revision", default=DEFAULT_HF_REVISION, help="exact model commit for --provider hf")
+    parser.add_argument(
+        "--title-mode",
+        choices=TITLE_MODES,
+        default="benchmark",
+        help="document titles: the corpus's own (benchmark) or ControlRoom's upload filenames (filename)",
+    )
     parser.add_argument("--gate", default=None, help="frozen quality-gate JSON; exit 1 on failure")
     args = parser.parse_args(argv)
 
     out = Path(args.out)
     report = run_qualification(
-        provider=args.provider, out_dir=out, top_k=args.top_k, hf_model=args.hf_model, device=args.device
+        provider=args.provider,
+        out_dir=out,
+        top_k=args.top_k,
+        hf_model=args.hf_model,
+        device=args.device,
+        hf_revision=args.hf_revision,
+        title_mode=args.title_mode,
     )
     write_report(report, out)
     print(json.dumps({k: report[k] for k in ("provider", "aggregate", "hard", "lifecycle", "latency_ms")}, indent=2))

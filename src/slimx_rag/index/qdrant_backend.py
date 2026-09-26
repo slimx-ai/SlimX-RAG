@@ -3,13 +3,21 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from slimx_rag.embed import EmbeddedChunk
 from slimx_rag.settings import IndexSettings
 
 from .base import IndexBackend, config_int
 from .types import IndexState, SearchResult
+
+# Qdrant accepts only UUIDs or unsigned integers as point ids; chunk ids are 64-hex digests.
+# Every chunk id maps to a deterministic UUIDv5 point id and rides in the payload.
+_POINT_NAMESPACE = UUID("8b1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d")
+
+
+def point_id_for(chunk_id: str) -> str:
+    return str(uuid5(_POINT_NAMESPACE, chunk_id))
 
 
 class QdrantIndexBackend(IndexBackend):
@@ -94,13 +102,15 @@ class QdrantIndexBackend(IndexBackend):
                 return set()
             found: set[str] = set()
             for start in range(0, len(ids), self.batch_size):
+                batch = ids[start : start + self.batch_size]
+                by_point = {point_id_for(cid): cid for cid in batch}
                 points = self.client.retrieve(
                     collection_name=self.collection,
-                    ids=ids[start : start + self.batch_size],
+                    ids=list(by_point),
                     with_payload=False,
                     with_vectors=False,
                 )
-                found.update(str(p.id) for p in points or [])
+                found.update(by_point[str(p.id)] for p in points or [] if str(p.id) in by_point)
             return found
 
     def load(self) -> None:
@@ -130,7 +140,7 @@ class QdrantIndexBackend(IndexBackend):
             return 0
         with self._network():
             for start in range(0, len(ids), self.batch_size):
-                batch: list[int | str | UUID] = list(ids[start : start + self.batch_size])
+                batch: list[int | str | UUID] = [point_id_for(cid) for cid in ids[start : start + self.batch_size]]
                 self.client.delete(collection_name=self.collection, points_selector=self._qm.PointIdsList(points=batch))
         return len(ids)
 
@@ -153,8 +163,12 @@ class QdrantIndexBackend(IndexBackend):
                 self._ensure_collection(expected_dim)
             if actual_dim != int(self._dim or expected_dim):
                 raise RuntimeError(f"Vector dim mismatch: expected {self._dim or expected_dim}, got {actual_dim}")
-            payload = {"text": it.text, "metadata": self._apply_metadata_whitelist(dict(it.metadata))}
-            points.append(self._qm.PointStruct(id=cid, vector=vector, payload=payload))
+            payload = {
+                "chunk_id": cid,
+                "text": it.text,
+                "metadata": self._apply_metadata_whitelist(dict(it.metadata)),
+            }
+            points.append(self._qm.PointStruct(id=point_id_for(cid), vector=vector, payload=payload))
             written += 1
         if points:
             with self._network():
@@ -183,7 +197,7 @@ class QdrantIndexBackend(IndexBackend):
         for p in response.points:
             payload = p.payload or {}
             out.append(SearchResult(
-                chunk_id=str(p.id),
+                chunk_id=str(payload.get("chunk_id") or p.id),
                 score=float(p.score),
                 text=str(payload.get("text") or ""),
                 metadata=dict(payload.get("metadata") or {}),

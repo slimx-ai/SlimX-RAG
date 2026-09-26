@@ -25,7 +25,14 @@ from typing import Any
 from slimx_rag.settings import RetrievalSettings
 
 from .lexical import LexicalIndex
-from .tokenize import lexical_tokens, normalize_query, query_identifiers, query_intent
+from .tokenize import (
+    filename_identity_tokens,
+    lexical_tokens,
+    looks_like_filename,
+    normalize_query,
+    query_identifiers,
+    query_intent,
+)
 
 # (query, top_k) -> [(chunk_id, cosine_score)] ranked best-first.
 DenseSearch = Callable[[str, int], list[tuple[str, float]]]
@@ -56,6 +63,9 @@ class ChunkRecord:
     # The passage shown to the caller when it differs from the embedded text (a field-addressed
     # fact sheet embeds one field but displays the whole sheet).
     display_text: str = ""
+    # The document's own title (heading, DOCX title, first line) when the caller's title is a
+    # product identity such as an upload filename; part of exact-identifier identity.
+    own_title: str = ""
 
 
 @dataclass(slots=True)
@@ -129,9 +139,7 @@ class HybridRetriever:
     # ``dense_search`` itself).
     lexical_filter: Callable[[str], bool] | None = None
 
-    def retrieve(
-        self, query: str, *, settings: RetrievalSettings
-    ) -> tuple[list[HybridResult], dict[str, Any]]:
+    def retrieve(self, query: str, *, settings: RetrievalSettings) -> tuple[list[HybridResult], dict[str, Any]]:
         nq = normalize_query(query)
         intent = query_intent(nq)
         q_ids = query_identifiers(nq)
@@ -140,9 +148,7 @@ class HybridRetriever:
         dense_rank = {cid: i for i, (cid, _) in enumerate(dense)}
         dense_score = {cid: s for cid, s in dense}
 
-        lexical_used = bool(
-            settings.enable_lexical and self.lexical is not None and len(self.lexical)
-        )
+        lexical_used = bool(settings.enable_lexical and self.lexical is not None and len(self.lexical))
         lexical: list[tuple[str, float]] = []
         if lexical_used and self.lexical is not None:
             if self.lexical_filter is not None:
@@ -164,16 +170,17 @@ class HybridRetriever:
                 continue
             identity_tokens = (
                 set(lexical_tokens(rec.source_title))
+                | set(lexical_tokens(rec.own_title))
                 | set(lexical_tokens(rec.entry))
                 | set(lexical_tokens(rec.section or ""))
                 | set(lexical_tokens(" ".join(rec.section_path)))
             )
+            if looks_like_filename(rec.source_title):
+                identity_tokens |= filename_identity_tokens(rec.source_title)
             exact = bool(q_ids & identity_tokens)
             text_exact = bool(q_ids & set(lexical_tokens(rec.text)))
             exact_score = (
-                settings.exact_match_boost
-                if exact
-                else (0.3 * settings.exact_match_boost if text_exact else 0.0)
+                settings.exact_match_boost if exact else (0.3 * settings.exact_match_boost if text_exact else 0.0)
             )
             adjusted = fscore + exact_score
             # Keep timeline/index pages from outranking fact sheets on factual questions.
@@ -210,9 +217,11 @@ class HybridRetriever:
             for r in results:
                 r.rerank_score = rr.get(r.chunk_id)
             results.sort(
-                key=lambda r: (-(r.rerank_score if r.rerank_score is not None else -1e9), r.chunk_id)
-                if r.rerank_score is not None
-                else (-r.fusion_score, r.chunk_id)
+                key=lambda r: (
+                    (-(r.rerank_score if r.rerank_score is not None else -1e9), r.chunk_id)
+                    if r.rerank_score is not None
+                    else (-r.fusion_score, r.chunk_id)
+                )
             )
         else:
             # Equal fused scores (e.g. dense #1 + lexical #2 versus dense #2 + lexical #1) are
@@ -238,9 +247,7 @@ class HybridRetriever:
         return selected, trace
 
 
-def _group_by_parent(
-    ordered: list[HybridResult], settings: RetrievalSettings
-) -> list[HybridResult]:
+def _group_by_parent(ordered: list[HybridResult], settings: RetrievalSettings) -> list[HybridResult]:
     """Strongest child per parent first; then sibling expansion for new fields, capped."""
     per_parent: dict[str, list[str | None]] = {}
     passages: dict[str, set[str]] = {}

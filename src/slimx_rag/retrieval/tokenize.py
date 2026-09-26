@@ -15,9 +15,50 @@ import re
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[.,\-/_][A-Za-z0-9]+)*")
 
 _TEMPORAL = {
-    "when", "date", "dated", "released", "release", "launched", "launch",
-    "timeline", "year", "chronology", "history",
+    "when",
+    "date",
+    "dated",
+    "released",
+    "release",
+    "launched",
+    "launch",
+    "timeline",
+    "year",
+    "chronology",
+    "history",
 }
+
+
+# A caller title that is an upload filename (``atlas-incident-2026-03-14.docx``): one lexical
+# token, so its words must be surfaced separately for identity matching and the identity prefix.
+_FILENAME_RE = re.compile(r"^[^\s/\\]+\.[A-Za-z0-9]{1,5}$")
+
+
+def looks_like_filename(title: str) -> bool:
+    """True for a bare filename with an extension and no spaces."""
+    return bool(_FILENAME_RE.match((title or "").strip()))
+
+
+def filename_words(title: str) -> list[str]:
+    """Lowercased words of a filename's stem (``atlas-safety-manual.pdf`` -> atlas safety manual)."""
+    stem = (title or "").strip().rsplit(".", 1)[0]
+    return [w.lower() for w in re.split(r"[-_.\s]+", stem) if w]
+
+
+def humanized_filename(title: str) -> str:
+    return " ".join(filename_words(title))
+
+
+def filename_identity_tokens(title: str) -> set[str]:
+    """Identity tokens of a filename title: its alphabetic words, its stem and the full name.
+
+    Numeric fragments (``2026``, ``03``) are excluded: a bare number in a question must never
+    exact-match a date embedded in a filename.
+    """
+    stripped = (title or "").strip()
+    stem = stripped.rsplit(".", 1)[0]
+    words = {w for w in filename_words(stripped) if not w.isdigit()}
+    return words | {stem.lower(), stripped.lower()}
 
 
 def lexical_tokens(text: str) -> list[str]:

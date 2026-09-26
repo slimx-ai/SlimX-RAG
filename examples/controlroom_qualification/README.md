@@ -50,7 +50,16 @@ python -m slimx_rag.eval.qualification --provider hash --out /tmp/cq-hash
 # the real CPU model (sentence-transformers/all-MiniLM-L6-v2, cached; no network, no GPU)
 HF_HUB_OFFLINE=1 python -m slimx_rag.eval.qualification --provider hf --out /tmp/cq-hf \
   --gate examples/controlroom_qualification/quality-gate.json
+
+# ControlRoom's title convention (every document titled by its upload filename); same gate,
+# gold and corpus. The official gate regime is `--title-mode benchmark` (the default) until the
+# owner authorizes a change of benchmark inputs.
+HF_HUB_OFFLINE=1 python -m slimx_rag.eval.qualification --provider hf --title-mode filename \
+  --out /tmp/cq-hf-filename --gate examples/controlroom_qualification/quality-gate.json
 ```
+
+`--hf-revision` defaults to the image's pinned model commit (`c9745ed1…`) and is recorded in the
+report as `hf_revision`; `--title-mode` is recorded as `title_mode`.
 
 Outputs: `report.json` (everything, per case), `report.md` (summary, by-tag table,
 failing cases), `gate-result.{json,md}` when a gate is supplied (exit code 1 on failure).

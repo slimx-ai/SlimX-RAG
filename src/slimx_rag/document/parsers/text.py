@@ -37,16 +37,16 @@ class TextParser:
     def parse(self, source: DocumentSource) -> ParsedDocument:
         text = _as_text(source)
         doc_id = source.document_id
-        elements, page_title, page_type = structure_block(
-            text, id_prefix=f"{doc_id}#p1", page_number=1
-        )
+        elements, page_title, page_type = structure_block(text, id_prefix=f"{doc_id}#p1", page_number=1)
         # The caller's title is the document's product identity; the inferred first line stays
         # the page/entry title used for grouping.
         title = str(source.metadata.get("title") or "") or page_title or _stem(source.filename)
         page = ParsedPage(
             page_number=1,
             elements=tuple(elements),
-            title=title,
+            # The entry (grouping/identity) title is the document's own first line; the caller's
+            # title stays the document's product identity (citations, listings).
+            title=page_title or title,
             page_type=page_type,
             text=text,
             inferred_title=page_title,
@@ -54,6 +54,7 @@ class TextParser:
         return ParsedDocument(
             document_id=doc_id,
             title=title,
+            own_title=page_title if page_title and page_title != title else None,
             source_type=source.source_type or "text",
             parser_name=self.name,
             parser_version=self.version,

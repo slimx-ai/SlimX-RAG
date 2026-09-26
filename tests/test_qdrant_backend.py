@@ -66,8 +66,23 @@ class FakeQdrantClient:
 
     def retrieve(self, *, collection_name: str, ids: list[str], with_payload: bool, with_vectors: bool):
         self.retrieve_calls.append(list(ids))
+        for pid in ids:
+            self._require_point_id(pid)
         store = self.points.get(collection_name, {})
-        return [types.SimpleNamespace(id=pid) for pid in ids if str(pid) in store]
+        by_point = {str(p.id): p for p in store.values()}
+        return [types.SimpleNamespace(id=pid) for pid in ids if str(pid) in by_point]
+
+    @staticmethod
+    def _require_point_id(value: object) -> None:
+        # The real client accepts only UUIDs or unsigned integers as point ids.
+        import uuid
+
+        if isinstance(value, int) and not isinstance(value, bool):
+            return
+        try:
+            uuid.UUID(str(value))
+        except ValueError as exc:
+            raise ValueError(f"Point id {value} is not a valid UUID") from exc
 
     def upsert(self, *, collection_name: str, points: list[FakePointStruct]):
         if collection_name not in self.collections:
@@ -75,12 +90,17 @@ class FakeQdrantClient:
         self.upsert_calls.append(list(points))
         store = self.points.setdefault(collection_name, {})
         for p in points:
-            store[str(p.id)] = p
+            self._require_point_id(p.id)
+            # Keyed by the chunk id carried in the payload (what the tests and callers reason about).
+            store[str(p.payload.get("chunk_id") or p.id)] = p
 
     def delete(self, *, collection_name: str, points_selector: FakePointIdsList):
         store = self.points.setdefault(collection_name, {})
-        for p in points_selector.points:
-            store.pop(str(p), None)
+        for pid in points_selector.points:
+            self._require_point_id(pid)
+            for cid, p in list(store.items()):
+                if str(p.id) == str(pid):
+                    store.pop(cid, None)
 
     # qdrant-client removed ``QdrantClient.search`` in 1.15; the fake deliberately offers only the
     # Universal Query API so a regression to ``search`` fails here instead of against a live server.
@@ -231,7 +251,9 @@ def test_qdrant_skip_existing_does_not_overwrite_existing_points(monkeypatch, tm
     ], skip_existing=True)
 
     assert written == 1
-    assert client.retrieve_calls[-1] == ["c1", "c2"]
+    from slimx_rag.index.qdrant_backend import point_id_for
+
+    assert client.retrieve_calls[-1] == [point_id_for("c1"), point_id_for("c2")]
     assert client.points["slimx"]["c1"].payload["text"] == "old"
     assert client.points["slimx"]["c2"].payload["text"] == "second"
 
@@ -321,3 +343,35 @@ def test_qdrant_api_key_is_passed_as_a_string_or_omitted(monkeypatch, tmp_path):
         state_path=tmp_path / "index_state.json",
     )
     assert FakeQdrantClient.instances[-1].api_key == "k"
+
+
+def test_qdrant_maps_chunk_ids_to_uuid_point_ids_against_the_real_client(monkeypatch, tmp_path):
+    """Qdrant accepts only UUID or integer point ids; 64-hex chunk ids must be mapped (RAG-AUD-041)."""
+    qdrant_client = pytest.importorskip("qdrant_client")
+
+    real = qdrant_client.QdrantClient
+
+    class MemoryClient(real):  # type: ignore[misc,valid-type]
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            super().__init__(":memory:")
+
+    monkeypatch.setattr(qdrant_client, "QdrantClient", MemoryClient)
+
+    from slimx_rag.index.qdrant_backend import QdrantIndexBackend, point_id_for
+
+    idx = QdrantIndexBackend(
+        tmp_path / "unused.index",
+        settings=IndexSettings(backend="qdrant", backend_config={"collection": "real"}),
+        state_path=tmp_path / "index_state.json",
+    )
+    idx.load()
+    idx.set_embed_config(EmbedSettings(provider="hash", dim=3))
+    cid = "ef" * 32
+    assert idx.upsert([EmbeddedChunk(chunk_id=cid, vector=[1.0, 0.0, 0.0], text="A", metadata={"k": 1})]) == 1
+    # skip_existing recognises the mapped point; the query returns the chunk id, not the point id.
+    assert idx.upsert([EmbeddedChunk(chunk_id=cid, vector=[1.0, 0.0, 0.0], text="A2", metadata={})]) == 0
+    hit = idx.query([1.0, 0.0, 0.0], top_k=1)[0]
+    assert hit.chunk_id == cid and hit.text == "A" and hit.metadata == {"k": 1}
+    assert point_id_for(cid) != cid
+    assert idx.delete([cid]) == 1
+    assert idx.query([1.0, 0.0, 0.0], top_k=1) == []

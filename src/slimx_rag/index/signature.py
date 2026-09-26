@@ -48,8 +48,11 @@ BACKEND_NAMESPACE_VERSION = "backend-namespace-v1"
 # prefix); heading-only parents emit no chunk. index-shaping-v3 (0.3.0, same release): a
 # heading-less fact sheet that fits the budget is addressed by its fields (one unit per labelled
 # field plus one for the remaining elements, each displaying the whole sheet, sharing one parent
-# and cited by its label). Indexes shaped by v1 or v2 must be rebuilt.
-INDEX_SHAPING_VERSION = "index-shaping-v3"
+# and cited by its label). index-shaping-v4 (0.3.0, same release): every unit of a field-
+# addressed sheet shares one parent and skips its own title line, and the identity prefix keeps
+# the document's own title and the words of a filename title. Indexes shaped by v1..v3 must be
+# rebuilt.
+INDEX_SHAPING_VERSION = "index-shaping-v4"
 ENGINE_NAME = "slimx-rag"
 INDEX_INSTANCE_ID_FILENAME = "index_instance_id"
 INDEX_BUILD_RECEIPT_FILENAME = "index_build_receipt.json"

@@ -3,7 +3,7 @@
 ## 0.3.0 — 2026-09-25 (ControlRoom qualification candidate; no GitHub release yet)
 
 Audit record: `docs/reviews/controlroom-qualification-2026-09-25.md`. Indexes shaped by earlier
-releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v3`).
+releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v4`).
 
 ### Changed (retrieval contract)
 
@@ -44,6 +44,39 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
 - `DELETE /api/documents/{id}` and document replacement sweep every stored chunk tagged with the
   document's `doc_id` in addition to the bookkept ids (`swept_chunks` reported), so a lost
   state commit can never leave deleted or superseded content retrievable.
+
+### Same-model review 2 corrections (2026-09-26, same release; `index-shaping-v4`)
+
+- Retrieval identity keeps the document's own title next to a caller title that is an upload
+  filename (ControlRoom's convention, `title = filename`): the identity prefix gains
+  `Title: <own title>` (Markdown H1, DOCX title, a text file's first line) and
+  `Name: <filename words>`, and exact-identifier matching sees the own title, the filename's
+  words, its stem and the full name. Before this, a filename title erased the heading identity
+  ("Incident Report IR-2026-031" became `atlas-incident-2026-03-14.docx`) and the frozen gate held
+  only under the benchmark's human titles (RAG-AUD-039). `index-shaping-v4`; older indexes rebuild.
+- `POST /api/admin/embedding` keeps the pinned model revision and the query/document prefixes
+  (they are persisted with the override); it accepts `hf_revision` and requires it when
+  `hf_model` changes on a revision-pinned deployment. Before this, a device change in the offline
+  image failed with `embedder_preflight_failed: OSError` because the merged settings dropped the
+  revision (RAG-AUD-040).
+- Qdrant backend: chunk ids (64-hex digests) map to deterministic UUIDv5 point ids and ride in
+  the payload; Qdrant accepts only UUID or integer ids, so the backend could not upsert at all.
+  Tested against `QdrantClient(":memory:")`; the unit-test fake now enforces the id rule
+  (RAG-AUD-041; the 0.3.0 note that RAG-AUD-038 "corrected" the backend was incomplete).
+- Scope filtering treats missing or non-string `workspace_id` / `document_id` metadata as out of
+  scope; `str(None)` no longer matches the literal scope `"None"` (RAG-AUD-042).
+- `POST /api/index` bounds `text` (`RAG_MAX_TEXT_CHARS`, default the file limit), rejects blank
+  text (422) and applies the element cap (413); a blank post used to replace a document with
+  nothing (RAG-AUD-046).
+- Text decoding keeps UTF-8 with sparse stray bytes (each becomes U+FFFD); only text with many
+  invalid sequences falls back to cp1252 / Latin-1 (RAG-AUD-048).
+- Qualification benchmark: `--hf-revision` (default the image's pinned commit `c9745ed1`, recorded
+  in the report; earlier reports recorded the cache's `refs/main`) and `--title-mode
+  benchmark|filename` (ControlRoom's title convention as a second regime; gate, gold and corpus
+  unchanged) (RAG-AUD-044).
+- Known limitation, documented: BM25 document-frequency statistics span every workspace, so
+  another tenant's text moves in-scope lexical scores and a scoped caller can infer term frequency
+  across tenants; candidates and text never cross (RAG-AUD-043).
 
 ### Field-addressed fact sheets (2026-09-25, same release; `index-shaping-v3`)
 

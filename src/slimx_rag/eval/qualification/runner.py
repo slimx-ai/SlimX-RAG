@@ -10,6 +10,7 @@ restart by dropping the hot backend, and records latency and memory.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import resource
@@ -27,6 +28,12 @@ from .gold import Scope, cases_for_phase
 
 TOKEN = "qualification-service-token"
 DEFAULT_HF_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# The exact model commit the candidate image bakes; the benchmark pins it so the recorded
+# runtime identity is the qualified one, never the cache's mutable ``refs/main``.
+DEFAULT_HF_REVISION = "c9745ed1d9f207416be6d2e6f8de32d1f16199bf"
+# ``benchmark``: the corpus's own document titles; ``filename``: ControlRoom's convention
+# (title = upload filename for every document). The gate file, gold and corpus are the same.
+TITLE_MODES = ("benchmark", "filename")
 _HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 _RESTART_SAMPLE = 12
 
@@ -199,10 +206,20 @@ def run_qualification(
     top_k: int = 8,
     hf_model: str = DEFAULT_HF_MODEL,
     device: str = "cpu",
+    hf_revision: str | None = DEFAULT_HF_REVISION,
+    title_mode: str = "benchmark",
 ) -> dict[str, Any]:
+    if title_mode not in TITLE_MODES:
+        raise ValueError(f"title_mode must be one of {TITLE_MODES}")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     corpus = build_corpus()
+    if title_mode == "filename":
+        corpus = dataclasses.replace(
+            corpus,
+            docs=tuple(dataclasses.replace(d, title=d.filename) for d in corpus.docs),
+            updates={k: dataclasses.replace(v, title=v.filename) for k, v in corpus.updates.items()},
+        )
     manifest = write_corpus(corpus, out_dir / "corpus")
     index_dir = out_dir / "index"
     index_dir.mkdir(exist_ok=True)
@@ -214,6 +231,7 @@ def run_qualification(
         "RAG_EMBED_PROVIDER": provider,
         "RAG_EMBED_DIM": "384",
         "RAG_HF_MODEL": hf_model,
+        "RAG_HF_REVISION": hf_revision if provider == "hf" else None,
         "RAG_EMBED_DEVICE": device if provider == "hf" else None,
         "RAG_AUTH_TOKEN": TOKEN,
         "DEMO_AUTH_TOKEN": None,
@@ -225,6 +243,8 @@ def run_qualification(
     fidelity_rows: list[dict[str, Any]] = []
     report: dict[str, Any] = {
         "dataset_version": corpus.version,
+        "title_mode": title_mode,
+        "hf_revision": hf_revision if provider == "hf" else None,
         "provider": provider,
         "top_k": top_k,
         "corpus_manifest_files": len(dict(manifest["files"])),  # type: ignore[call-overload]

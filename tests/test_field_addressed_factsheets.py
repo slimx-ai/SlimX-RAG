@@ -214,7 +214,8 @@ def test_caller_title_that_differs_from_the_first_line_still_yields_one_parent(c
     assert res.json()["chunk_count"] == 4  # three fields + the trailing sentence; no title-only unit
 
     listed = client.get("/api/documents/log2/chunks", params={"workspace_id": "ws"}).json()["chunks"]
-    assert [c["section"] for c in listed] == ["LAST SERVICE", "TECHNICIAN", "NOTES", "atlas-maintenance-log.txt"]
+    # The remaining-elements unit is cited by the sheet's own first line, not by the caller's filename.
+    assert [c["section"] for c in listed] == ["LAST SERVICE", "TECHNICIAN", "NOTES", "Atlas Maintenance Log"]
     assert len({c["text"] for c in listed}) == 1
 
     for question in ("LAST SERVICE planner next slot", "Atlas Maintenance Log", "TECHNICIAN NOTES"):

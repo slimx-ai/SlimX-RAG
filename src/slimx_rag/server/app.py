@@ -60,6 +60,7 @@ from slimx_rag.version import get_engine_version
 # Bounded limits for the file-indexing endpoint (all tunable via env).
 MAX_FILE_BYTES = int(os.getenv("RAG_MAX_FILE_BYTES", str(25 * 1024 * 1024)))
 MAX_ELEMENTS = int(os.getenv("RAG_MAX_ELEMENTS", "20000"))
+MAX_TEXT_CHARS = int(os.getenv("RAG_MAX_TEXT_CHARS", str(MAX_FILE_BYTES)))
 logger = logging.getLogger(__name__)
 
 
@@ -120,8 +121,14 @@ def _embed_settings() -> EmbedSettings:
         # Immutable model identity for the hf provider: an exact Hugging Face commit. The image
         # pins it so a mutable `main` can never be adopted at runtime (see docs/deployment.md).
         revision=str(override.get("revision") or os.getenv("RAG_HF_REVISION") or "") or None,
-        query_prefix=os.getenv("RAG_EMBED_QUERY_PREFIX", ""),
-        document_prefix=os.getenv("RAG_EMBED_DOCUMENT_PREFIX", ""),
+        query_prefix=str(
+            override["query_prefix"] if "query_prefix" in override else os.getenv("RAG_EMBED_QUERY_PREFIX", "")
+        ),
+        document_prefix=str(
+            override["document_prefix"]
+            if "document_prefix" in override
+            else os.getenv("RAG_EMBED_DOCUMENT_PREFIX", "")
+        ),
     )
 
 
@@ -136,6 +143,9 @@ def _write_embed_override(settings: EmbedSettings) -> None:
                 "hf_model": settings.hf_model,
                 "dim": settings.dim,
                 "device": settings.device,
+                "revision": settings.revision,
+                "query_prefix": settings.query_prefix,
+                "document_prefix": settings.document_prefix,
             }
         ),
     )
@@ -368,6 +378,7 @@ def _to_chunk_record(result: SearchResult) -> ChunkRecord:
         section=section,
         page_type=str(md.get("page_type") or "unknown"),
         source_title=str(md.get("source_title") or md.get("title") or ""),
+        own_title=str(md.get("own_title") or ""),
         entry=entry,
         token_count=_as_int(md.get("token_count")),
         # A heading path, a page of a paginated document or a field label locates the passage;
@@ -416,6 +427,7 @@ def _chunks_to_documents(
                     "page_type": ch.page_type.value,
                     "entry": ch.metadata.get("entry", ""),
                     "source_title": ch.source_title,
+                    "own_title": ch.own_title,
                     "display_text": ch.display_text,
                     "token_count": ch.token_count,
                     "ordinal": ch.ordinal,
@@ -600,8 +612,16 @@ class EvalRequest(BaseModel):
 class IndexRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=MAX_IDENTIFIER_CHARS)
     document_id: str = Field(min_length=1, max_length=MAX_IDENTIFIER_CHARS)
-    text: str
+    # Bounded like an uploaded file; a blank text would silently replace a document with nothing.
+    text: str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
     metadata: dict[str, Any] | None = None
+
+    @field_validator("text")
+    @classmethod
+    def _text_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("text must not be blank")
+        return value
 
     @field_validator("workspace_id", "document_id")
     @classmethod
@@ -629,6 +649,7 @@ _RESERVED_METADATA_KEYS = frozenset(
         "page_type",
         "entry",
         "source_title",
+        "own_title",
         "display_text",
         "token_count",
         "ordinal",
@@ -745,6 +766,10 @@ class EmbeddingConfigRequest(BaseModel):
     provider: str | None = None
     model: str | None = None
     hf_model: str | None = None
+    # Exact Hugging Face commit for the hf provider. Required when ``hf_model`` changes while a
+    # revision is pinned: the old model's revision must never be applied to the new model, and
+    # the offline image cannot resolve an unpinned model.
+    hf_revision: str | None = Field(default=None, min_length=1, max_length=64)
     dim: int | None = Field(default=None, gt=0)
     device: str | None = None
 
@@ -1093,12 +1118,27 @@ def set_embedding(payload: EmbeddingConfigRequest, authorization: str | None = H
     """
     _check_token(authorization)
     current = _embed_settings()
-    merged = EmbedSettings(
+    new_hf_model = payload.hf_model or current.hf_model
+    if payload.hf_revision:
+        revision: str | None = payload.hf_revision
+    elif new_hf_model == current.hf_model:
+        revision = current.revision  # same model: keep its pinned revision
+    elif current.revision:
+        raise HTTPException(
+            status_code=422,
+            detail="hf_revision is required when changing hf_model on a revision-pinned deployment",
+        )
+    else:
+        revision = None
+    # Everything not named by the request (revision, prefixes, batch size, ...) is kept.
+    merged = dataclasses.replace(
+        current,
         provider=payload.provider or current.provider,
         model=payload.model or current.model,
-        hf_model=payload.hf_model or current.hf_model,
+        hf_model=new_hf_model,
         dim=payload.dim or current.dim,
         device=payload.device if payload.device is not None else current.device,
+        revision=revision,
     )
     try:
         merged.validate()
@@ -1389,10 +1429,16 @@ def _hybrid_retrieve_response(
     scope_docs = {str(d) for d in payload.document_ids} if payload.document_ids else None
 
     def in_scope(md: dict[str, object]) -> bool:
-        if scope_ws is not None and str(md.get("workspace_id")) != scope_ws:
-            return False
-        if scope_docs is not None and str(md.get("document_id")) not in scope_docs:
-            return False
+        # Missing or non-string metadata is out of scope: str(None) == "None" must never match
+        # a caller who sends the literal workspace_id "None".
+        if scope_ws is not None:
+            ws = md.get("workspace_id")
+            if not isinstance(ws, str) or ws != scope_ws:
+                return False
+        if scope_docs is not None:
+            doc = md.get("document_id")
+            if not isinstance(doc, str) or doc not in scope_docs:
+                return False
         return True
 
     # Embed the query once, OFF the index lock (and off any per-request model rebuild).
@@ -1591,6 +1637,8 @@ def index_endpoint(payload: IndexRequest, authorization: str | None = Header(def
         )
     except DocumentError as exc:
         raise HTTPException(status_code=422, detail=f"parse_failed: {type(exc).__name__}: {exc}") from exc
+    if parsed.element_count > MAX_ELEMENTS:
+        raise HTTPException(status_code=413, detail=f"document has {parsed.element_count} elements; max {MAX_ELEMENTS}")
     chunks = _chunks_to_documents(
         chunk_parsed_document(parsed, settings=structured_chunk_settings, token_counter=token_counter),
         workspace_id=payload.workspace_id,
