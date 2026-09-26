@@ -45,6 +45,22 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
   document's `doc_id` in addition to the bookkept ids (`swept_chunks` reported), so a lost
   state commit can never leave deleted or superseded content retrievable.
 
+### Same-model review 4 corrections (2026-09-26, same release)
+
+- `POST /api/admin/embedding` keeps a persisted model revision across a later device or prefix
+  change. Before this, a model switch that supplied `hf_revision` followed by ControlRoom's
+  `{"device": "cpu"}` rewrote the override without the revision, so the switched model ran with
+  the image's `RAG_HF_REVISION` and every embedding path returned 503 (`embedder_init_failed`);
+  ControlRoom cannot send `hf_revision` and had no recovery. The image's env revision is still
+  never adopted into the override.
+- Every embedder construction validates its settings, so a mutable `RAG_HF_REVISION` (such as
+  `main`) from the environment fails closed in the service: `/ready` and the embedding paths report
+  503 `embedder_config_invalid` with the reason (`EmbedConfigError`). Before this, only the admin
+  route and the CLI validated the value.
+- The text decoder compares invalid UTF-8 sequences with the valid multibyte characters instead of
+  a byte ratio: a short UTF-8 note with a few accented characters and one stray byte stays UTF-8
+  (the 5 % rule turned it into cp1252 mojibake), while sparse cp1252 accents still decode as cp1252.
+
 ### Owner decisions on the qualification benchmark (2026-09-26, same release; `index-shaping-v5`)
 
 - Two mandatory quality gates. `quality-gate.json` (the benchmark's own document titles) is

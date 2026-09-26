@@ -378,7 +378,13 @@ def _cache_key(s: EmbedSettings) -> tuple[object, ...]:
 
 
 def get_cached_embedder(settings: EmbedSettings) -> Embedder:
-    """Return a process-cached embedder for ``settings`` (constructs once per key)."""
+    """Return a process-cached embedder for ``settings`` (constructs once per key).
+
+    The settings are validated on every call, so an invalid configuration from the environment
+    (a mutable ``RAG_HF_REVISION`` such as ``main``) fails closed on every path that embeds —
+    not only at the admin route and the CLI, which validate their own inputs.
+    """
+    settings.validate()
     key = _cache_key(settings)
     embedder = _EMBEDDER_CACHE.get(key)
     if embedder is None:

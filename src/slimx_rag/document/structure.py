@@ -224,9 +224,6 @@ def detect_source_type(filename: str, mime_type: str | None) -> str:
 _TEXT_CONTROL_OK = {"\t", "\n", "\r", "\x0c"}
 
 
-_UTF8_REPLACEMENT_RATIO = 0.05  # <= 5 % of the NON-ASCII bytes invalid: still a UTF-8 document
-
-
 def _control_ratio(text: str) -> float:
     if not text:
         return 0.0
@@ -245,14 +242,15 @@ def decode_text(content: bytes) -> str:
         return content.decode("utf-8-sig")
     except UnicodeDecodeError:
         pass
-    # UTF-8 with a few stray bytes stays UTF-8 (each bad byte becomes U+FFFD); only text with
-    # many invalid sequences is legacy-encoded and falls back to cp1252 / Latin-1.
-    # Measured against the non-ASCII bytes, not the whole text: legacy cp1252 prose is almost
-    # entirely invalid among its accented bytes even when they are sparse in a long English note,
-    # while UTF-8 with a stray byte is almost entirely valid.
+    # UTF-8 with stray bytes stays UTF-8 (each bad byte becomes U+FFFD); legacy-encoded text
+    # falls back to cp1252 / Latin-1. The invalid sequences are compared with the VALID multibyte
+    # characters, not with a byte ratio: cp1252 prose decodes to essentially no valid multibyte
+    # character however sparse its accents are, while UTF-8 prose with a stray byte keeps every
+    # accented character it has — even a short note with four accents and one stray byte.
     replaced = content.decode("utf-8", errors="replace")
-    non_ascii = sum(1 for b in content if b >= 0x80)
-    if replaced and non_ascii and replaced.count("\ufffd") / non_ascii <= _UTF8_REPLACEMENT_RATIO:
+    invalid = replaced.count("\ufffd")
+    valid_multibyte = sum(1 for ch in replaced if ord(ch) >= 0x80 and ch != "\ufffd")
+    if replaced and invalid <= valid_multibyte:
         return replaced.lstrip("\ufeff")
     try:
         return content.decode("cp1252")

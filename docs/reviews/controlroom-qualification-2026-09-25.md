@@ -628,3 +628,21 @@ filename gate fails exactly the `title_mode` pin (verified). Tests: `tests/test_
 No threshold, gold case, corpus document, embedding model, revision or reranking policy. The
 Qdrant/pgvector backends are untouched (the line lives in the embedding text and metadata).
 
+## 14. Same-model review 4 (Claude, 2026-09-26) of `eb365f7b..c7148a5` and the corrections it required
+
+Not independent (author-side evidence, never posted as a review approval). The reviewer reproduced
+every claim of §13: ruff/mypy clean, 312 tests, both gates PASS 26/26 with `hf_revision` c9745ed1
+recorded, the gate pins working both ways, benchmark mode rank-identical to 1f0cd413, filename mode
+changed only at file-014 in the gated ranks (two lower-rank swaps: file-013 6↔7, sem-028 5↔6), the
+evaluator-2 scoping sound, and the build inputs byte-unchanged since bf306d5e. Three findings remained:
+
+| Id | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| RAG-AUD-056 | Medium | A model switch that supplied `hf_revision` (the README flow) followed by a ControlRoom-style `{"device":"cpu"}` rewrote `embed_override.json` without the revision, so the switched model ran with the image's `RAG_HF_REVISION` and `/ready` / `/api/index` returned 503 `embedder_init_failed`; ControlRoom cannot send `hf_revision` and had no recovery (reproduced offline with bge-small cached; unreachable in the qualified offline image, reachable online). | Corrected: a revision the override already carries is persisted again when the request names none and the model is unchanged; the image's env revision is still never adopted into the file. Two-step test (switch with revision, then device change; then a prefix-only change). |
+| RAG-AUD-057 | Low | `RAG_HF_REVISION=main` from the environment was accepted by the service (`/ready` 200, indexing on a mutable ref) although the README says mutable refs are rejected; `EmbedSettings.validate()` ran only in the admin route and the CLI. | Corrected: `get_cached_embedder` validates the settings on every construction; `/ready` and every embedding path report 503 `embedder_config_invalid` (`EmbedConfigError`, a `ValueError` subclass) with the reason. README states it. Tested. |
+| RAG-AUD-058 | Low | The 5 % replacement-ratio rule (RAG-AUD-054) broke the opposite sparse case: a short UTF-8 note with four accented characters and one stray byte crossed the threshold and fell back to cp1252 (whole note mojibake, "JosÃ©", "â€™"). | Corrected: invalid sequences are compared with the valid multibyte characters (cp1252 prose decodes to essentially none; UTF-8 prose with a stray byte keeps every accent), so both sparse cases decode correctly; tested both ways. |
+| — | Info | The `Language:` line is the second correction designed against a single gold case; both regimes pass top-1 with one case to spare (43 of 46) and there is no held-out set. | Recorded: the margin is thin. The line is a document fact (parser-inferred language), measured with no other gated-rank change; a held-out set is a benchmark-extension decision for the owner, not taken here. |
+
+Nothing in these corrections touches retrieval, chunking or the benchmark; the final-quality runs are
+repeated at the corrected head for the record and must be identical.
+

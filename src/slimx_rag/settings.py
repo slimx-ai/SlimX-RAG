@@ -108,6 +108,10 @@ class RetrievalSettings:
             raise ValueError("retrieval.exact_match_boost must be >= 0")
 
 
+class EmbedConfigError(ValueError):
+    """An embedding configuration that must never be used (e.g. a mutable model revision)."""
+
+
 @dataclass(frozen=True, slots=True)
 class EmbedSettings:
     provider: str = "hash"  # hash | openai | hf
@@ -140,7 +144,7 @@ class EmbedSettings:
         if self.revision is not None and not self.revision.strip():
             raise ValueError("embed.revision must be a non-empty string when set")
         if self.provider == "hf" and self.revision is not None and not re.fullmatch(r"[0-9a-f]{40}", self.revision):
-            raise ValueError(
+            raise EmbedConfigError(
                 "embed.revision must be an exact 40-hex Hugging Face commit (mutable refs such as 'main' are rejected)"
             )
         if self.batch_size <= 0:

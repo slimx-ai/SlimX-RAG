@@ -49,6 +49,7 @@ from slimx_rag.retrieval import (
 )
 from slimx_rag.settings import (
     ChunkSettings,
+    EmbedConfigError,
     EmbedSettings,
     IndexSettings,
     RetrievalSettings,
@@ -133,10 +134,12 @@ def _embed_settings() -> EmbedSettings:
 def _write_embed_override(settings: EmbedSettings, *, persist_revision: bool = False) -> None:
     """Persist the runtime embedding choice.
 
-    The model revision is persisted only when the request supplied one: otherwise the image's
-    ``RAG_HF_REVISION`` keeps governing, so a later image baked at another commit is not stranded
-    by a stale pinned revision on the volume. Recovery from a stale persisted revision: delete
-    ``embed_override.json`` next to the index (documented in the README).
+    The model revision is persisted only when a request supplied one (now, or earlier: a revision
+    the override already carries stays with it across a later device or prefix change, otherwise a
+    switched model would run with the image's ``RAG_HF_REVISION`` and fail to load). When the
+    override carries none, the image's ``RAG_HF_REVISION`` keeps governing, so a later image baked
+    at another commit is not stranded by a stale pinned revision on the volume. Recovery from a
+    stale persisted revision: delete ``embed_override.json`` next to the index (README).
     """
     path = _embed_override_path()
     payload: dict[str, Any] = {
@@ -708,6 +711,17 @@ def _service_failure(exc: Exception) -> HTTPException:
 def _embedder_or_503(embed_settings: EmbedSettings) -> Embedder:
     try:
         return get_cached_embedder(embed_settings)
+    except EmbedConfigError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "embedder_config_invalid",
+                "retryable": False,
+                "error_type": type(exc).__name__,
+                "detail": str(exc),
+                "owner_action": "Fix the embedding configuration (RAG_HF_REVISION or embed_override.json) and restart.",
+            },
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — surfaced as the readiness reason, never a bare 500
         raise HTTPException(
             status_code=503,
@@ -990,6 +1004,8 @@ def ready(authorization: str | None = Header(default=None)) -> JSONResponse:
                 embedder = get_cached_embedder(embed_settings)
                 embed_dim = embedder.dim
                 signature_token_counter = embedder.token_counter()
+            except EmbedConfigError as exc:
+                return not_ready("embedder_config_invalid", detail=str(exc))
             except Exception as exc:  # noqa: BLE001
                 return not_ready("embedder_init_failed", detail=type(exc).__name__)
             signature_dimension = resolve_embedding_dimension(
@@ -1123,6 +1139,7 @@ def set_embedding(payload: EmbeddingConfigRequest, authorization: str | None = H
     """
     _check_token(authorization)
     current = _embed_settings()
+    override_revision = str(_load_embed_override().get("revision") or "") or None
     new_hf_model = payload.hf_model or current.hf_model
     if payload.hf_revision:
         revision: str | None = payload.hf_revision
@@ -1162,6 +1179,9 @@ def set_embedding(payload: EmbeddingConfigRequest, authorization: str | None = H
         token_counter = embedder.token_counter()
     except Exception as exc:  # noqa: BLE001 — surface only the safe exception type
         raise HTTPException(status_code=422, detail=f"embedder_preflight_failed: {type(exc).__name__}") from exc
+    # Keep a revision the override already carries (a switched model's pin) when the request did
+    # not name one; never adopt the image's env revision into the file.
+    keep_persisted_revision = override_revision is not None and revision == override_revision
     try:
         with _index_lock, locked_index_instance(_index_instance_id_path(), create=True) as lease:
             new_instance_id = _reset_index(
@@ -1169,7 +1189,7 @@ def set_embedding(payload: EmbeddingConfigRequest, authorization: str | None = H
                 lease=lease,
                 new_embed_settings=merged,
                 persist_embed_override=True,
-                persist_revision=bool(payload.hf_revision),
+                persist_revision=bool(payload.hf_revision) or keep_persisted_revision,
             )
     except IndexResetPartialFailure as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
