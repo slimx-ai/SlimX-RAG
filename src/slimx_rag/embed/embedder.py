@@ -340,7 +340,13 @@ class HuggingFaceEmbedder(Embedder):
 
 
 def make_embedder(settings: EmbedSettings) -> Embedder:
-    """Construct a fresh embedder (no caching). See ``get_cached_embedder`` for reuse."""
+    """Construct a fresh embedder (no caching). See ``get_cached_embedder`` for reuse.
+
+    Every construction validates the settings first, so an invalid configuration (a mutable
+    ``RAG_HF_REVISION`` such as ``main``) fails closed on every path that embeds — the cached
+    service paths and the dense-only retrieval path of the non-local backends alike.
+    """
+    settings.validate()
     if settings.provider == "hash":
         return HashEmbedder(dim=settings.dim)
     if settings.provider == "openai":
@@ -380,9 +386,10 @@ def _cache_key(s: EmbedSettings) -> tuple[object, ...]:
 def get_cached_embedder(settings: EmbedSettings) -> Embedder:
     """Return a process-cached embedder for ``settings`` (constructs once per key).
 
-    The settings are validated on every call, so an invalid configuration from the environment
-    (a mutable ``RAG_HF_REVISION`` such as ``main``) fails closed on every path that embeds —
-    not only at the admin route and the CLI, which validate their own inputs.
+    The settings are validated on every call (cache hits included; ``make_embedder`` validates
+    every construction as well), so an invalid configuration from the environment (a mutable
+    ``RAG_HF_REVISION`` such as ``main``) fails closed on every path that embeds — not only at
+    the admin route and the CLI, which validate their own inputs.
     """
     settings.validate()
     key = _cache_key(settings)

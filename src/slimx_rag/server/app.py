@@ -685,6 +685,18 @@ def _service_failure(exc: Exception) -> HTTPException:
     message = str(exc)
     if isinstance(exc, HTTPException):
         return exc
+    if isinstance(exc, EmbedConfigError):
+        # The same reason /ready reports: the embedding configuration must never be used.
+        return HTTPException(
+            status_code=503,
+            detail={
+                "code": "embedder_config_invalid",
+                "retryable": False,
+                "error_type": type(exc).__name__,
+                "detail": message,
+                "owner_action": "Fix the embedding configuration (RAG_HF_REVISION or embed_override.json) and restart.",
+            },
+        )
     if "Corrupt index state" in message:
         code, status = "index_state_invalid", 503
     elif "index build receipt" in message.lower():

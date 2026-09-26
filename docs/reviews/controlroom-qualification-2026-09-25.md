@@ -646,3 +646,30 @@ evaluator-2 scoping sound, and the build inputs byte-unchanged since bf306d5e. T
 Nothing in these corrections touches retrieval, chunking or the benchmark; the final-quality runs are
 repeated at the corrected head for the record and must be identical.
 
+## 15. Owner-directed Claude review 1 (2026-09-26/27) of `eb365f7b..1dd6736` and the correction it required
+
+Not independent: the same Claude session that ran the same-model passes 1–4 reviewed the head at the
+owner's direction (evidence `13-review-claude-owner-directed-1dd67362-20260926T220604Z/` in the
+evidence root: REVIEW.md, commands, logs, full gate reports, probes p1–p6). It executed ruff, mypy,
+318 tests, both hf gates and the hash gate at the head (both gates PASS 26/26 with the recorded values),
+verified the gate files (the original byte-identical to the benchmark commit, the filename gate an
+exact threshold copy with honest pins), evaluator version 2, the revision rules and decoder in every
+sequence, scope/delete/rebuild, the image-to-source correspondence (63 source files byte-identical to
+`git archive`) and ControlRoom `815229e1`'s consuming contract. Disposition B with one Low finding:
+
+| Id | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| RAG-AUD-059 (RAG-REV-001) | Low | `retrieval/retriever.py` `retrieve()` built its embedder with `make_embedder`, which did not validate the settings, so on the non-local backends (FAISS, Qdrant, pgvector) an unscoped `/api/retrieve` or `/api/ask` still embedded with `RAG_HF_REVISION=main` (reproduced on FAISS: `/ready` 503 `embedder_config_invalid`, `/api/retrieve` 200 with an embedder built at `main`). Readiness and embedding disagreed and the RAG-AUD-057 statement "every embedding path" was false for this path. Unreachable from ControlRoom (local backend, always scoped). | Corrected: `make_embedder` validates every construction (the cache validates as well), `_service_failure` maps `EmbedConfigError` to 503 `embedder_config_invalid` with the reason, so `/api/retrieve`, `/api/ask` and `/api/eval/run` report what `/ready` reports. Regression test: FAISS index built with a valid configuration, then env `main` — unscoped retrieve and ask return 503 `embedder_config_invalid` and no embedder is constructed with `main` (spy); the test fails without the fix. Two token-counter tests that built embedders with non-commit revisions to exercise the counter's own guard now build the embedder directly, so both guards stay tested. |
+
+The reviewer's independent diagnostic (a fresh 12-document corpus, 20 questions, filename titles; not a
+gate) is recorded as supporting generality without proving it: top-1 16/20 before field addressing,
+13/20 with field addressing before the own-title fix, 18/20 with the own-title fix, 19/20 at the head
+(the `Language:` line fixed only the "Which Python function" question). Non-blocking observations
+recorded without change: a future image that changes the default model runs a volume override's older
+model at the new image's revision (documented recovery: delete `embed_override.json`); a file mixing
+UTF-8 and cp1252 is inherently ambiguous; a synthetic payload of only high bytes passes the binary check
+(inherited; real formats are rejected); the exact-identifier boost can let a document outrank a better
+textual answer; BM25 statistics span workspaces (documented, RAG-AUD-043); ControlRoom's `.env.example`
+still defaults to the moving `slimx-rag:latest` image (belongs to the ControlRoom delta review); Qdrant
+is exercised in-memory and with fakes only, so it is not qualified for ControlRoom.
+

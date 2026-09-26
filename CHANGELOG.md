@@ -45,6 +45,16 @@ releases report `index_signature_mismatch` and must be rebuilt (`index-shaping-v
   document's `doc_id` in addition to the bookkept ids (`swept_chunks` reported), so a lost
   state commit can never leave deleted or superseded content retrievable.
 
+### Owner-directed Claude review 1 corrections (2026-09-27, same release)
+
+- The dense-only retrieval path of the non-local backends (FAISS, Qdrant, pgvector; used by
+  unscoped `/api/retrieve`, `/api/ask` and `/api/eval/run`) built its embedder through
+  `make_embedder`, which did not validate the settings, so a mutable `RAG_HF_REVISION` was
+  still accepted there while `/ready` already reported `embedder_config_invalid`. Every
+  construction now validates (`make_embedder` and the cache alike) and the retrieval routes report
+  the same 503 `embedder_config_invalid` with the reason. ControlRoom (local backend, always scoped)
+  could not reach the gap. Regression test on a FAISS index.
+
 ### Same-model review 4 corrections (2026-09-26, same release)
 
 - `POST /api/admin/embedding` keeps a persisted model revision across a later device or prefix
