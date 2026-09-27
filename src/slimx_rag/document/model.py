@@ -96,6 +96,10 @@ class ParsedPage:
     page_type: PageType = PageType.UNKNOWN
     text: str = ""  # normalized page text
     metadata: dict[str, Any] = field(default_factory=dict)
+    # The first-line title ``structure_block`` inferred from the page text itself. ``title`` may
+    # instead be the caller's document title (text sources), so the chunker uses this one to
+    # recognise the page's own title line.
+    inferred_title: str | None = None
 
     @property
     def is_empty(self) -> bool:
@@ -115,6 +119,10 @@ class ParsedDocument:
     pages: tuple[ParsedPage, ...] = ()
     warnings: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
+    # The document's own title (Markdown H1, DOCX Title, a text file's first line) when the
+    # caller's ``title`` is a product identity such as the upload filename. Retrieval identity
+    # keeps both so an identifier in the document's heading survives a filename title.
+    own_title: str | None = None
 
     @property
     def elements(self) -> list[ParsedElement]:
@@ -148,6 +156,7 @@ class RetrievalChunk:
     page_type: PageType = PageType.UNKNOWN
     element_types: tuple[ElementType, ...] = ()
     source_title: str = ""
+    own_title: str | None = None  # the document's own title when it differs from source_title
     ordinal: int = 0  # ordinal within the parent
     forced_split: bool = False  # True when an oversized element was hard-split
     metadata: dict[str, Any] = field(default_factory=dict)

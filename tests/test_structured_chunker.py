@@ -45,19 +45,22 @@ def _parse(monkeypatch: pytest.MonkeyPatch) -> object:
     return PdfParser().parse(src)
 
 
-def test_factsheet_page_stays_one_self_contained_chunk(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_factsheet_page_is_addressed_by_field_and_stays_self_contained(monkeypatch: pytest.MonkeyPatch) -> None:
+    """index-shaping-v3: a heading-less fact-sheet page yields one unit per field, each showing
+    the whole page (see tests/test_field_addressed_factsheets.py for the full contract)."""
     doc = _parse(monkeypatch)
     chunks = chunk_parsed_document(doc, token_counter=HeuristicTokenCounter(max_tokens=1000))
     fact = [c for c in chunks if c.page_number == 2]
-    assert len(fact) == 1
-    c = fact[0]
-    assert "Document: gallery" in c.embedding_text
-    assert "Page: 2" in c.embedding_text
-    assert "Entry: Kimi K2.6" in c.embedding_text
-    # The reported failure: KEY DETAIL label and its value must stay together.
-    assert "KEY DETAIL" in c.display_text and "refined routing" in c.display_text
-    assert c.page_type == PageType.FACT_SHEET
-    assert c.token_count > 0
+    assert [c.section for c in fact] == ["SCALE", "CONTEXT TOKENS", "ATTENTION", "KEY DETAIL"]
+    for c in fact:
+        assert "Document: gallery" in c.embedding_text
+        assert "Page: 2" in c.embedding_text
+        assert "Entry: Kimi K2.6" in c.embedding_text
+        # The reported failure: KEY DETAIL label and its value must stay together, on every unit.
+        assert "KEY DETAIL" in c.display_text and "refined routing" in c.display_text
+        assert c.page_type == PageType.FACT_SHEET
+        assert c.token_count > 0
+    assert "Section: KEY DETAIL" in fact[-1].embedding_text and "refined routing" in fact[-1].embedding_text
 
 
 def test_no_chunk_exceeds_token_cap_and_keeps_identity(monkeypatch: pytest.MonkeyPatch) -> None:

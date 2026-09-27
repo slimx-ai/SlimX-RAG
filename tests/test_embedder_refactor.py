@@ -10,12 +10,13 @@ from langchain_core.documents import Document
 
 from slimx_rag.embed import (
     HashEmbedder,
+    HuggingFaceEmbedder,
     embed_chunks,
     get_cached_embedder,
     make_embedder,
     reset_embedder_cache,
 )
-from slimx_rag.settings import EmbedSettings
+from slimx_rag.settings import EmbedConfigError, EmbedSettings
 
 
 class _FakeTokenizer:
@@ -140,6 +141,13 @@ def test_token_counter_prefers_resolved_model_commit_over_mutable_revision(
     assert ":vocab:" in counter.identity
 
 
+def _hf_embedder(revision: str) -> HuggingFaceEmbedder:
+    """Build the hf embedder directly (no settings validation) to test the counter's own rules."""
+    return HuggingFaceEmbedder(
+        model="m", device=None, normalize_embeddings=True, query_prefix="", document_prefix="", revision=revision
+    )
+
+
 def test_unpinned_hf_counter_rejects_unresolved_model_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -149,8 +157,12 @@ def test_unpinned_hf_counter_rejects_unresolved_model_identity(
 
     _install(monkeypatch, _UnresolvedST)
 
+    # The settings guard fires first on every construction path (RAG-AUD-057/059) ...
+    with pytest.raises(EmbedConfigError):
+        make_embedder(EmbedSettings(provider="hf", hf_model="m", revision="main"))
+    # ... and the counter keeps its own guard when an embedder is built directly.
     with pytest.raises(RuntimeError, match="model revision identity"):
-        make_embedder(EmbedSettings(provider="hf", hf_model="m", revision="main")).token_counter()
+        _hf_embedder("main").token_counter()
 
 
 @pytest.mark.parametrize("revision", ["a" * 40, "B" * 64])
@@ -162,7 +174,9 @@ def test_hf_counter_accepts_explicit_immutable_commit_when_runtime_hash_is_unava
             raise AttributeError("no runtime commit metadata")
 
     _install(monkeypatch, _UnresolvedST)
-    counter = make_embedder(EmbedSettings(provider="hf", hf_model="m", revision=revision)).token_counter()
+    # The counter accepts any explicit immutable hash; the settings contract is narrower (an
+    # exact 40-hex Hugging Face commit), so the 64-hex variant bypasses make_embedder.
+    counter = _hf_embedder(revision).token_counter()
 
     assert f"@model:{revision.lower()}:" in counter.identity
     assert "@main" not in counter.identity

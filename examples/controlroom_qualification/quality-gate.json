@@ -1,0 +1,58 @@
+{
+  "gate_version": "1",
+  "dataset_version": "cq-2026-09-25.1",
+  "frozen_at": "2026-09-25",
+  "frozen_against": "SlimX-RAG eb365f7be5b6051fb75ed7253d212963e8dc820d plus the benchmark commit, before any retrieval, chunking or ranking change",
+  "top_k": 8,
+  "policy": "Thresholds may not be lowered after seeing post-change results without explicit owner authorization. The hard section is provider-neutral and non-negotiable; ranking thresholds apply to the CPU release candidate embedder (hf, sentence-transformers/all-MiniLM-L6-v2).",
+  "hard": {
+    "cross_workspace_leaks": 0,
+    "cross_project_leaks": 0,
+    "cross_scope_leaks": 0,
+    "forbidden_document_leaks": 0,
+    "stale_deleted_hits": 0,
+    "chunks_listed_after_delete": 0,
+    "updated_doc_stale_hits": 0,
+    "forbidden_text_hits": 0,
+    "citation_wrong_source": 0,
+    "citation_wrong_locator": 0,
+    "citation_label_mismatch": 0,
+    "citation_missing_locator": 0,
+    "unstable_cases": 0,
+    "restart_inconsistent": 0,
+    "index_failures": 0,
+    "retrieve_failures": 0,
+    "duplicate_chunks": 0
+  },
+  "hard_by_provider": {
+    "hf": {
+      "updated_doc_missing_new_content": 0,
+      "expected_locator_failures": 0
+    }
+  },
+  "ranking": {
+    "hf": {
+      "hit_at_1": 0.85,
+      "hit_at_5": 0.95,
+      "mrr": 0.88,
+      "ndcg_at_8": 0.88,
+      "exact_identifier_hit_at_1": 0.95,
+      "top1_expected_source_rate": 0.93,
+      "multi_doc_coverage_at_8": 0.9
+    }
+  },
+  "rationale": {
+    "hard.cross_*_leaks / forbidden_document_leaks": "Workspace, project (explicit document set) and explicit document restriction are security boundaries; any leak is a release blocker (handoff section 12).",
+    "hard.stale_deleted_hits / chunks_listed_after_delete": "A document ControlRoom deleted must not be served again, even when a lagging host scope still names its id.",
+    "hard.updated_doc_stale_hits / forbidden_text_hits": "Re-indexing a document id replaces its content; old text must never be returned.",
+    "hard.citation_wrong_source / citation_wrong_locator / citation_label_mismatch / citation_missing_locator": "Citation fidelity: every returned chunk is attributed to the document, page (PDF) and heading (Markdown/DOCX) that actually holds its text, and the label agrees with the metadata (verified against the corpus bytes, independent of ranking).",
+    "hard.unstable_cases / restart_inconsistent": "Retrieval must be deterministic across identical calls and across a service restart (the persisted index is the truth).",
+    "hard[hf].updated_doc_missing_new_content": "After re-indexing, the new content must be retrievable for its direct question; otherwise updates silently vanish from the product.",
+    "hard[hf].expected_locator_failures": "For the citation-fidelity gold cases (unambiguous page/section questions) the best result from the right document must carry the gold page or section; a wrong or absent locator is a wrong citation to the reader (handoff section 12: 0 in required citation-fidelity cases).",
+    "ranking.hit_at_5 >= 0.95": "ControlRoom packs about five to eight chunks into the prompt; the source of an answerable gold question must be among them at least 95% of the time.",
+    "ranking.hit_at_1 >= 0.85, mrr >= 0.88, ndcg_at_8 >= 0.88": "The first passage the model reads should usually be the right one; these bound the average rank of the right source without demanding perfection on paraphrase and semantic questions.",
+    "ranking.exact_identifier_hit_at_1 >= 0.95": "Part numbers, report ids, tags and constants are the precise lookups engineering users depend on; the first hit must be right in at least 19 of 20 cases.",
+    "ranking.top1_expected_source_rate >= 0.93": "For questions with one unambiguous source, the top result must come from it (at most 3 misses in the 46 tagged cases).",
+    "ranking.multi_doc_coverage_at_8 >= 0.9": "Comparison and multi-source questions must surface every required document within the eight returned chunks."
+  }
+}

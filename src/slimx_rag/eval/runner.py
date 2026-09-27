@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from slimx_rag.answer import answer
-from slimx_rag.retrieval import retrieve
+from slimx_rag.retrieval import RetrievalResult, retrieve
 from slimx_rag.settings import EmbedSettings, IndexSettings
 from slimx_rag.utils.commons import _atomic_write_text
 
@@ -77,18 +78,24 @@ def run_eval(
     timeout: float | None = None,
     max_tokens: int | None = None,
     max_context_chars: int | None = None,
+    retriever: Callable[[str], RetrievalResult] | None = None,
 ) -> EvalReport:
+    """Evaluate ``cases``; ``retriever`` lets a host (the HTTP service) supply its own retrieval
+    path so evaluation measures exactly what ``/api/retrieve`` serves."""
     rows = []
     hits = cited = insufficient_pass = insufficient_total = 0
     for case in cases:
-        retrieval = retrieve(
-            case.question,
-            index_path=index_path,
-            embed_settings=embed_settings,
-            index_settings=index_settings,
-            state_path=state_path,
-            top_k=top_k,
-        )
+        if retriever is not None:
+            retrieval = retriever(case.question)
+        else:
+            retrieval = retrieve(
+                case.question,
+                index_path=index_path,
+                embed_settings=embed_settings,
+                index_settings=index_settings,
+                state_path=state_path,
+                top_k=top_k,
+            )
         result = answer(
             case.question,
             retrieval,

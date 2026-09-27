@@ -106,10 +106,15 @@ def retrieve(
         candidates = idx.query(list(map(float, qvec)), top_k=fetch_k)
 
         def _in_scope(md: dict[str, object]) -> bool:
-            if scope_ws is not None and str(md.get("workspace_id")) != scope_ws:
-                return False
-            if scope_docs is not None and str(md.get("document_id")) not in scope_docs:
-                return False
+            # Missing or non-string metadata is out of scope (str(None) must never match "None").
+            if scope_ws is not None:
+                ws = md.get("workspace_id")
+                if not isinstance(ws, str) or ws != scope_ws:
+                    return False
+            if scope_docs is not None:
+                doc = md.get("document_id")
+                if not isinstance(doc, str) or doc not in scope_docs:
+                    return False
             return True
 
         raw_results = [r for r in candidates if _in_scope(r.metadata or {})][:k]

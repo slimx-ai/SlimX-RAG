@@ -116,8 +116,15 @@ class EmbeddingTokenCounter:
         text = text or ""
         encode = getattr(self._tok, "encode", None)
         if callable(encode):
+            # verbose=False: measuring a whole parent before splitting legitimately exceeds the
+            # model limit; the chunker enforces the cap, so the tokenizer's warning is noise.
             try:
-                return len(encode(text))
+                return len(encode(text, verbose=False))
+            except TypeError:
+                try:
+                    return len(encode(text))
+                except Exception:  # noqa: BLE001 — fall back to the call form below
+                    pass
             except Exception:  # noqa: BLE001 — fall back to the call form below
                 pass
         try:
@@ -246,11 +253,11 @@ class HuggingFaceEmbedder(Embedder):
                 "HuggingFaceEmbedder requires optional dependency 'sentence-transformers'. "
                 "Install extras (e.g. `uv sync --extra hf`)."
             ) from e
-        kwargs: dict[str, object] = {}
-        if revision:
-            kwargs["revision"] = revision
         # device=None lets SentenceTransformers auto-select (CUDA if available, else CPU).
-        self._model = SentenceTransformer(model, device=device, **kwargs)
+        if revision:
+            self._model = SentenceTransformer(model, device=device, revision=revision)
+        else:
+            self._model = SentenceTransformer(model, device=device)
         self._normalize = normalize_embeddings
         self._query_prefix = query_prefix
         self._document_prefix = document_prefix
@@ -333,7 +340,13 @@ class HuggingFaceEmbedder(Embedder):
 
 
 def make_embedder(settings: EmbedSettings) -> Embedder:
-    """Construct a fresh embedder (no caching). See ``get_cached_embedder`` for reuse."""
+    """Construct a fresh embedder (no caching). See ``get_cached_embedder`` for reuse.
+
+    Every construction validates the settings first, so an invalid configuration (a mutable
+    ``RAG_HF_REVISION`` such as ``main``) fails closed on every path that embeds — the cached
+    service paths and the dense-only retrieval path of the non-local backends alike.
+    """
+    settings.validate()
     if settings.provider == "hash":
         return HashEmbedder(dim=settings.dim)
     if settings.provider == "openai":
@@ -371,7 +384,14 @@ def _cache_key(s: EmbedSettings) -> tuple[object, ...]:
 
 
 def get_cached_embedder(settings: EmbedSettings) -> Embedder:
-    """Return a process-cached embedder for ``settings`` (constructs once per key)."""
+    """Return a process-cached embedder for ``settings`` (constructs once per key).
+
+    The settings are validated on every call (cache hits included; ``make_embedder`` validates
+    every construction as well), so an invalid configuration from the environment (a mutable
+    ``RAG_HF_REVISION`` such as ``main``) fails closed on every path that embeds — not only at
+    the admin route and the CLI, which validate their own inputs.
+    """
+    settings.validate()
     key = _cache_key(settings)
     embedder = _EMBEDDER_CACHE.get(key)
     if embedder is None:

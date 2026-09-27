@@ -192,9 +192,30 @@ class IndexBackend(ABC):
     # only one document and must not disturb the others. These helpers act on one doc.
 
     def delete_doc(self, doc_id: str) -> int:
-        """Delete one document's currently-indexed chunks (best-effort, no-op if unknown)."""
+        """Delete one document's currently-indexed chunks; returns the number deleted.
+
+        Authoritative on backends that can enumerate their corpus: the bookkept chunk ids from
+        ``IndexState`` are unioned with every stored chunk whose metadata ``doc_id`` matches, so a
+        lost or lagging state commit (crash between ``save`` and ``commit_doc_state``) can never
+        leave a document's chunks behind. Backends that cannot enumerate fall back to the
+        bookkept ids only. See :meth:`delete_doc_detailed` for the split.
+        """
+        bookkept, swept = self.delete_doc_detailed(doc_id)
+        return bookkept + swept
+
+    def delete_doc_detailed(self, doc_id: str) -> tuple[int, int]:
+        """Delete one document's chunks; return ``(deleted_by_bookkeeping, deleted_by_sweep)``."""
         old = self.state.docs.get(doc_id) or {}
-        return self.delete(old.get("chunk_ids", []) or [])
+        bookkept_ids = [str(cid) for cid in (old.get("chunk_ids", []) or [])]
+        bookkept = self.delete(bookkept_ids)
+        known = set(bookkept_ids)
+        stray = [
+            cid
+            for cid, _text, metadata in self.iter_chunks()
+            if cid not in known and str((metadata or {}).get("doc_id")) == str(doc_id)
+        ]
+        swept = self.delete(stray) if stray else 0
+        return bookkept, swept
 
     def commit_doc_state(self, doc_id: str, content_hash: str, chunk_ids: list[str]) -> None:
         """Merge one document's state entry and persist; leaves other docs untouched.

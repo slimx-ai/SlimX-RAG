@@ -196,17 +196,18 @@ class DocxParser:
                 )
             )
 
-        title = doc_title or str(source.metadata.get("title") or "") or _stem(source.filename)
+        title = str(source.metadata.get("title") or "") or doc_title or _stem(source.filename)
         page = ParsedPage(
             page_number=1,
             elements=tuple(elements),
-            title=title,
+            title=doc_title or title,
             page_type=PageType.NARRATIVE,
             text="\n\n".join(full_text),
         )
         return ParsedDocument(
             document_id=doc_id,
             title=title,
+            own_title=doc_title if doc_title and doc_title != title else None,
             source_type="docx",
             parser_name=self.name,
             parser_version=self.version,
